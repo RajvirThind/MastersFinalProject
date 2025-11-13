@@ -188,3 +188,14 @@ print(results_df.head())
 if results_df is not None:
     # Now call the new plotting method
     optimiser.plot_operation(results_df)
+
+
+
+
+
+#improvements to be made:
+#need to add daily cycling constraint to limit battery cycling
+#need to add degradation cost to objective function
+#seperate arbitrage from anciallary markets 
+#include contract constraints to ensure battery meets contractual obligations
+
