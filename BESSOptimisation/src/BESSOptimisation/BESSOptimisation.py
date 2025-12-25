@@ -22,7 +22,12 @@ class BESS_Optimiser:
         self.soc_min = battery_params.get('soc_min_factor', 0.1) * self.capacity
         self.soc_max = battery_params.get('soc_max_factor', 0.9) * self.capacity
         self.soc_initial = battery_params.get('soc_initial_factor', 0.5) * self.capacity
+
+        self.cycle_limit = battery_params.get('cycle_limit', 2.0) #1 cycle per day
+        self.charge_c_rate = battery_params.get('charge_c_rate', 1.0) #1C charge rate
+        self.discharge_c_rate = battery_params.get('discharge_c_rate', 1.0) #1C discharge rate
         self.big_M = self.p_max # Placeholder for big M formulation
+
         
         self.model = pulp.LpProblem("BESS_Optimisation", pulp.LpMaximize)
 
@@ -37,19 +42,46 @@ class BESS_Optimiser:
                                          lowBound=self.soc_min, upBound=self.soc_max, cat='Continuous')
         self.is_charging = pulp.LpVariable.dicts("is_charging", self.time_steps, cat='Binary')
         self.is_discharging = pulp.LpVariable.dicts("is_discharging", self.time_steps, cat='Binary')
+        self.daily_cycles = pulp.LpVariable("daily_cycles", lowBound=0, upBound=self.cycle_limit, cat='Continuous') #creating a variable for daily throughput cycles
+        self.discharge_energy = pulp.LpVariable.dicts("discharge_energy", self.time_steps, lowBound=0, cat='Continuous') #variable to track energy discharged each time step
+        self.high_intensity_discharge = pulp.LpVariable.dicts("high_intensity_discharge", self.time_steps, lowBound=0, cat='Continuous') #variable to track high intensity discharge
 
 
     def set_objective(self):
         """defining objective function: maxmise total profit across all markets"""
-        self.model += pulp.lpSum(
+
+        standard_deg_cost = 10 # cost per MWh for normal use
+        penalty_deg_cost = 30 # cost per MWh for high c-rate
+
+        # Revenue Calculation
+        revenue = pulp.lpSum(
             (self.discharge[(t, m)] * self.all_prices[m][t] * self.dt) - 
             (self.charge[(t, m)] * self.all_prices[m][t] * self.dt) 
             for t in self.time_steps 
             for m in self.markets
-        ), "Total_Profit"
+        )
+
+        # Basic Discharge Degradation
+        basic_deg = pulp.lpSum(
+            pulp.lpSum(self.discharge[(t, m)] for m in self.markets) * self.dt * standard_deg_cost
+            for t in self.time_steps
+        )
+
+        # High Intensity Discharge Degradation
+        intensity_deg = pulp.lpSum(
+            self.high_intensity_discharge[t] * self.dt * penalty_deg_cost
+            for t in self.time_steps
+        )
+
+        self.model += revenue - basic_deg - intensity_deg, "Total_Profit"
 
     def set_constraints(self):
         """applies all physical and operational constraints to the model"""
+
+        total_discharge_energy = []
+        safe_c_rate = 0.5 
+        safe_power_limit = safe_c_rate * self.capacity
+
         for t in self.time_steps:
             
             # --- Aggregated Power Limits ---
@@ -64,6 +96,15 @@ class BESS_Optimiser:
             self.model += Total_Discharge_t <= self.is_discharging[t] * self.big_M, f"Discharge_Exclusive_{t}"
             self.model += self.is_charging[t] + self.is_discharging[t] <= 1, f"Charging_Status_{t}"
 
+            # === Daily Cycle Limit ===
+            self.model += self.discharge_energy[t] == (Total_Discharge_t / self.rte) * self.dt, f"Discharge_Energy_Calc_{t}"
+            total_discharge_energy.append(self.discharge_energy[t])
+
+            # ===C-Rate Constraints ===
+            self.model += Total_Charge_t <= self.charge_c_rate * self.capacity, f"Charge_CRate_{t}"
+            self.model += Total_Discharge_t <= self.discharge_c_rate * self.capacity, f"Discharge_CRate_{t}"
+            self.model += self.high_intensity_discharge[t] >= Total_Discharge_t - safe_power_limit, f"High_Intensity_Tracking_{t}"
+
             # --- Energy Balance (SOC Dynamics) ---
             t_loc = self.prices_df.index.get_loc(t)
             
@@ -75,6 +116,8 @@ class BESS_Optimiser:
                 
             self.model += self.soc[t] == soc_prev + (Total_Charge_t * self.rte * self.dt) - \
                                         (Total_Discharge_t / self.rte * self.dt), f"Energy_Balance_{t}"
+            
+            self.model += pulp.lpSum(total_discharge_energy) <= self.daily_cycles * self.capacity, f"Daily_Cycle_Limit_{t}"
             
 
     def solve_and_collect(self):
@@ -168,6 +211,7 @@ prices_df = prices_df.drop(columns=['Unnamed: 0', 'WeatherYear', 'Year'], errors
 prices_df['Date'] = pd.to_datetime(prices_df['Date']) #making sure Date is correct format
 prices_df = prices_df.set_index('Date')
 prices_df = prices_df.head(96)  # Using a smaller dataset for quicker testing
+print(prices_df)
 battery_params = {
     'time_interval': 0.5,  # hours
     'max_power': 10,       # MW
@@ -175,7 +219,8 @@ battery_params = {
     'capacity': 20,        # MWh
     'soc_min_factor': 0.1, # 10% of capacity
     'soc_max_factor': 0.9, # 90% of capacity
-    'soc_initial_factor': 0.5 # 50% of capacity
+    'soc_initial_factor': 0.5, # 50% of capacity
+    'cycle_limit': 2.0     # 2 cycles per day
 }
 
 optimiser = BESS_Optimiser(prices_df, battery_params)
@@ -184,6 +229,7 @@ optimiser.set_objective()
 optimiser.set_constraints()
 results_df = optimiser.solve_and_collect()
 print(results_df.head())
+
 
 if results_df is not None:
     # Now call the new plotting method
