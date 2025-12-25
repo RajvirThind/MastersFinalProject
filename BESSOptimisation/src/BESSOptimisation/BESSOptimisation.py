@@ -8,6 +8,10 @@ class BESS_Optimiser:
     """Mixed Ineteger Linear Programming (MILP) Optimiser for BESS Operation across multiple markets."""
     def __init__(self, prices_df, battery_params):
         """initialising the model parameters and input data"""
+        self.arbitrage_markets = ['DayAhead', 'Intraday', 'BM', 'Imbalance']
+        self.ancillary_low = ['DCDMLow', 'DRLow'] #needs discharge headroom
+        self.ancillary_high = ['DCDMHigh', 'DRHigh'] #needs charge headroom
+
         self.prices_df = prices_df.sort_index()
         self.time_steps = prices_df.index
         self.markets = self.prices_df.columns.tolist()
@@ -48,32 +52,49 @@ class BESS_Optimiser:
 
 
     def set_objective(self):
-        """defining objective function: maxmise total profit across all markets"""
-
-        standard_deg_cost = 10 # cost per MWh for normal use
-        penalty_deg_cost = 30 # cost per MWh for high c-rate
-
-        # Revenue Calculation
-        revenue = pulp.lpSum(
-            (self.discharge[(t, m)] * self.all_prices[m][t] * self.dt) - 
-            (self.charge[(t, m)] * self.all_prices[m][t] * self.dt) 
-            for t in self.time_steps 
-            for m in self.markets
+        """
+        Defining objective function: 
+        1. Maximize Energy Profit (Arbitrage)
+        2. Maximize Availability Revenue (Ancillary)
+        3. Subtract Degradation Costs (Standard + High C-Rate Penalty)
+        """
+        # Define Market Groups
+        arbitrage_markets = ['DayAhead', 'Intraday', 'BM', 'Imbalance']
+        ancillary_markets = ['DCDMLow', 'DCDMHigh', 'DRLow', 'DRHigh']
+        
+        # 1. Arbitrage Profit (Energy Traded)
+        # Revenue = (Discharge - Charge) * Price * Time
+        arbitrage_profit = pulp.lpSum(
+            (self.discharge[(t, m)] - self.charge[(t, m)]) * self.all_prices[m][t] * self.dt
+            for t in self.time_steps for m in arbitrage_markets
         )
 
-        # Basic Discharge Degradation
-        basic_deg = pulp.lpSum(
-            pulp.lpSum(self.discharge[(t, m)] for m in self.markets) * self.dt * standard_deg_cost
+        # 2. Ancillary Revenue (Capacity Reserved)
+        # Revenue = Reserved Power * Price * Time (No 'Charge' cost subtracted)
+        ancillary_revenue = pulp.lpSum(
+            (self.discharge[(t, m)] + self.charge[(t, m)]) * self.all_prices[m][t] * self.dt
+            for t in self.time_steps for m in ancillary_markets
+        )
+
+        # 3. Degradation & Penalty Costs
+        standard_deg_cost = 5.0   # £/MWh of throughput
+        high_c_penalty = 15.0     # Extra £/MWh for high intensity use
+        
+        # Standard throughput wear (on total arbitrage discharge)
+        deg_cost = pulp.lpSum(
+            pulp.lpSum(self.discharge[(t, m)] for m in arbitrage_markets) * self.dt * standard_deg_cost
+            for t in self.time_steps
+        )
+        
+        # C-Rate penalty (calculated in set_constraints)
+        penalty_cost = pulp.lpSum(
+            self.high_intensity_discharge[t] * self.dt * high_c_penalty
             for t in self.time_steps
         )
 
-        # High Intensity Discharge Degradation
-        intensity_deg = pulp.lpSum(
-            self.high_intensity_discharge[t] * self.dt * penalty_deg_cost
-            for t in self.time_steps
-        )
+        # Final Objective: Maximize Net Profit
+        self.model += (arbitrage_profit + ancillary_revenue) - (deg_cost + penalty_cost), "Total_Net_Profit"
 
-        self.model += revenue - basic_deg - intensity_deg, "Total_Profit"
 
     def set_constraints(self):
         """applies all physical and operational constraints to the model"""
@@ -82,12 +103,24 @@ class BESS_Optimiser:
         safe_c_rate = 0.5 
         safe_power_limit = safe_c_rate * self.capacity
 
-        for t in self.time_steps:
-            
-            # --- Aggregated Power Limits ---
-            Total_Charge_t = pulp.lpSum(self.charge[(t, m)] for m in self.markets)
-            Total_Discharge_t = pulp.lpSum(self.discharge[(t, m)] for m in self.markets)
+        arb_mkts = ['DayAhead', 'Intraday', 'BM', 'Imbalance']
+        anc_low_mkts = ['DCDMLow', 'DRLow']   # Export/Discharge services
+        anc_high_mkts = ['DCDMHigh', 'DRHigh'] # Import/Charge services
 
+        for t in self.time_steps:
+
+            # Total energy actually traded (arbitrage)
+            step_arb_charge = pulp.lpSum(self.charge[(t, m)] for m in arb_mkts)
+            step_arb_discharge = pulp.lpSum(self.discharge[(t, m)] for m in arb_mkts)
+
+            # Total reserve commited (ancillary)
+            step_anc_high = pulp.lpSum(self.charge[(t, m)] for m in anc_high_mkts)
+            step_anc_low = pulp.lpSum(self.discharge[(t, m)] for m in anc_low_mkts)
+
+            Total_Charge_t = step_arb_charge + step_anc_high
+            Total_Discharge_t = step_arb_discharge + step_anc_low
+
+            #Total combined power must not exceed p_max -> you cannot sell your max power to DayAhead and to DR at the same time    
             self.model += Total_Charge_t <= self.p_max, f"Max_Total_Charge_Power_{t}"
             self.model += Total_Discharge_t <= self.p_max, f"Max_Total_Discharge_Power_{t}"
             
@@ -103,21 +136,18 @@ class BESS_Optimiser:
             # ===C-Rate Constraints ===
             self.model += Total_Charge_t <= self.charge_c_rate * self.capacity, f"Charge_CRate_{t}"
             self.model += Total_Discharge_t <= self.discharge_c_rate * self.capacity, f"Discharge_CRate_{t}"
+            # --- High Intensity Discharge Tracking ---
             self.model += self.high_intensity_discharge[t] >= Total_Discharge_t - safe_power_limit, f"High_Intensity_Tracking_{t}"
 
             # --- Energy Balance (SOC Dynamics) ---
             t_loc = self.prices_df.index.get_loc(t)
-            
-            if t_loc == 0:
-                soc_prev = self.soc_initial
-            else:
-                prev_t = self.time_steps[t_loc - 1]
-                soc_prev = self.soc[prev_t]
+            soc_prev = self.soc_initial if t_loc == 0 else self.soc[self.time_steps[t_loc - 1]]
                 
             self.model += self.soc[t] == soc_prev + (Total_Charge_t * self.rte * self.dt) - \
                                         (Total_Discharge_t / self.rte * self.dt), f"Energy_Balance_{t}"
-            
-            self.model += pulp.lpSum(total_discharge_energy) <= self.daily_cycles * self.capacity, f"Daily_Cycle_Limit_{t}"
+        
+        usable_capacity = self.soc_max - self.soc_min
+        self.model += pulp.lpSum(total_discharge_energy) <= self.daily_cycles * usable_capacity, f"Daily_Cycle_Limit_{t}"
             
 
     def solve_and_collect(self):
@@ -240,8 +270,17 @@ if results_df is not None:
 
 
 #improvements to be made:
-#need to add daily cycling constraint to limit battery cycling
-#need to add degradation cost to objective function
-#seperate arbitrage from anciallary markets 
+#need to ensure that SOC only moves for arbitrage, ancillary restricts how full or empty the battery can get
+#adding minimum delivery constraints
+#market block constraints (EFA blocks)
+#utilisation factor for ancillary services to address the fact the ancillary services get called occasionally 
 #include contract constraints to ensure battery meets contractual obligations
+
+
+#optional 
+#soc dependent power limits - charging rate changes as batery approaches 100%
+#piecewise linear efficiency curve where efficiency peaks at 0.5C and drops at 1.0C
+#parasitic losses 
+#depth of discharge constraints to protect battery life
+
 
