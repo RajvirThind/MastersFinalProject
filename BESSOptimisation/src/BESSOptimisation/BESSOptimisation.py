@@ -30,7 +30,11 @@ class BESS_Optimiser:
         self.cycle_limit = battery_params.get('cycle_limit', 2.0) #1 cycle per day
         self.charge_c_rate = battery_params.get('charge_c_rate', 1.0) #1C charge rate
         self.discharge_c_rate = battery_params.get('discharge_c_rate', 1.0) #1C discharge rate
+        self.utilisation_factor = battery_params.get('utilisation_factor', 0.02)
         self.big_M = self.p_max # Placeholder for big M formulation
+
+        self.skip_rates = battery_params.get('skip_rates', pd.DataFrame(0, index=self.time_steps, columns=self.markets))
+
 
         
         self.model = pulp.LpProblem("BESS_Optimisation", pulp.LpMaximize)
@@ -69,11 +73,12 @@ class BESS_Optimiser:
             for t in self.time_steps for m in arbitrage_markets
         )
 
-        # 2. Ancillary Revenue (Capacity Reserved)
-        # Revenue = Reserved Power * Price * Time (No 'Charge' cost subtracted)
+        # 2. Ancillary Revenue with Skip Rate Penalty (Availability)
+        # Revenue = Reserved Power * (Price - Penalty * SkipRate)
+        penalty_weight = 10.0 # Adjust based on risk tolerance
         ancillary_revenue = pulp.lpSum(
-            (self.discharge[(t, m)] + self.charge[(t, m)]) * self.all_prices[m][t] * self.dt
-            for t in self.time_steps for m in ancillary_markets
+            (self.discharge[(t, m)] + self.charge[(t, m)]) * (self.all_prices[m][t] - penalty_weight * self.skip_rates.loc[t, m]) * self.dt
+            for t in self.time_steps for m in (self.ancillary_low + self.ancillary_high)
         )
 
         # 3. Degradation & Penalty Costs
@@ -102,10 +107,26 @@ class BESS_Optimiser:
         total_discharge_energy = []
         safe_c_rate = 0.5 
         safe_power_limit = safe_c_rate * self.capacity
+        alpha = self.utilisation_factor
 
         arb_mkts = ['DayAhead', 'Intraday', 'BM', 'Imbalance']
         anc_low_mkts = ['DCDMLow', 'DRLow']   # Export/Discharge services
         anc_high_mkts = ['DCDMHigh', 'DRHigh'] # Import/Charge services
+
+        # EFA block constraints (4 hour locks for ancillary services)
+        # 4 hours = 8 steps (since dt = 0.5 hours)
+        steps_per_block = int(4 / self.dt)
+
+        for block_start in range(0, len(self.time_steps), steps_per_block):
+            block_indices = self.time_steps[block_start: block_start + steps_per_block]
+            first_t = block_indices[0]
+
+            for m in (anc_low_mkts + anc_high_mkts):
+                for next_t in block_indices[1:]:
+                    # Force all steps in the block to have the same power for market m
+                    self.model += self.charge[(next_t, m)] == self.charge[(first_t, m)], f"EFA_Block_Ch_{m}_{next_t}"
+                    self.model += self.discharge[(next_t, m)] == self.discharge[(first_t, m)], f"EFA_Block_Ds_{m}_{next_t}"
+
 
         for t in self.time_steps:
 
@@ -129,10 +150,6 @@ class BESS_Optimiser:
             self.model += Total_Discharge_t <= self.is_discharging[t] * self.big_M, f"Discharge_Exclusive_{t}"
             self.model += self.is_charging[t] + self.is_discharging[t] <= 1, f"Charging_Status_{t}"
 
-            # === Daily Cycle Limit ===
-            self.model += self.discharge_energy[t] == (Total_Discharge_t / self.rte) * self.dt, f"Discharge_Energy_Calc_{t}"
-            total_discharge_energy.append(self.discharge_energy[t])
-
             # ===C-Rate Constraints ===
             self.model += Total_Charge_t <= self.charge_c_rate * self.capacity, f"Charge_CRate_{t}"
             self.model += Total_Discharge_t <= self.discharge_c_rate * self.capacity, f"Discharge_CRate_{t}"
@@ -142,93 +159,96 @@ class BESS_Optimiser:
             # --- Energy Balance (SOC Dynamics) ---
             t_loc = self.prices_df.index.get_loc(t)
             soc_prev = self.soc_initial if t_loc == 0 else self.soc[self.time_steps[t_loc - 1]]
-                
-            self.model += self.soc[t] == soc_prev + (Total_Charge_t * self.rte * self.dt) - \
-                                        (Total_Discharge_t / self.rte * self.dt), f"Energy_Balance_{t}"
-        
+
+            # SOC moves firm for Arbitrage, and slightly (alpha) for Ancillary
+            energy_in = (step_arb_charge + (alpha * step_anc_high)) * self.rte * self.dt
+            energy_out = (step_arb_discharge + (alpha * step_anc_low)) / self.rte * self.dt
+            self.model += self.soc[t] == soc_prev + energy_in - energy_out, f"Energy_Balance_{t}"
+
+            self.model += self.soc[t] >= self.soc_min + (step_anc_low * 0.5), f"Ancillary_Footroom_{t}" #ensure we have enough energy to discharge if an ancillary low service is called 
+            self.model += self.soc[t] <= self.soc_max - (step_anc_high * 0.5), f"Ancillary_Headroom_{t}" #ensure we have enough energy to charge if an ancillary high service is called
+            #0.5 is used which represents a 30 minute full power delivery requirement
+
+            # === Daily Cycle Limit ===
+            self.model += self.discharge_energy[t] == energy_out, f"Discharge_Energy_Calc_{t}"
+            total_discharge_energy.append(self.discharge_energy[t])
+
+
         usable_capacity = self.soc_max - self.soc_min
-        self.model += pulp.lpSum(total_discharge_energy) <= self.daily_cycles * usable_capacity, f"Daily_Cycle_Limit_{t}"
+        self.model += pulp.lpSum(total_discharge_energy) <= self.daily_cycles * usable_capacity, f"Global_Daily_Cycle_Limit_{t}"
             
 
     def solve_and_collect(self):
         """solves the LP model and extracts the results into a DataFrame."""
-        self.model.solve(pulp.PULP_CBC_CMD(msg=False, gapRel=0.05)) # Reduced gapRel for faster testing
+        self.model.solve(pulp.PULP_CBC_CMD(msg=False, gapRel=0.05))
 
         if pulp.LpStatus[self.model.status] == 'Optimal':
-            print(f"Optimal Solution Found. Total Profit: {pulp.value(self.model.objective):,.2f}")
+            print(f"Profit: {pulp.value(self.model.objective):,.2f} | Cycles: {pulp.value(self.daily_cycles):.2f}")
             results_df = pd.DataFrame(index=self.time_steps) 
-
-            # Extract Total Power and SOC
-            results_df['Total Charge'] = [
-                sum(self.charge[(t, m)].varValue or 0 for m in self.markets) for t in self.time_steps
-            ]
-            results_df['Total Discharge'] = [
-                sum(self.discharge[(t, m)].varValue or 0 for m in self.markets) for t in self.time_steps
-            ]
-            results_df['SOC'] = [self.soc[t].varValue or 0 for t in self.time_steps]
+            results_df['SOC'] = [self.soc[t].varValue for t in self.time_steps]
             
-            # Extract Market-Specific Power and Profit
             total_profit_values = np.zeros(len(self.time_steps))
 
             for m in self.markets:
-                results_df[f'Charge_{m}'] = [self.charge[(t, m)].varValue for t in self.time_steps]
-                results_df[f'Discharge_{m}'] = [self.discharge[(t, m)].varValue for t in self.time_steps]
+                p_ch = np.array([self.charge[(t, m)].varValue for t in self.time_steps])
+                p_ds = np.array([self.discharge[(t, m)].varValue for t in self.time_steps])
+                results_df[f'Power_{m}'] = p_ds - p_ch
                 
-                market_profit = [
-                    (self.discharge[(t, m)].varValue * self.all_prices[m][t] * self.dt) - 
-                    (self.charge[(t, m)].varValue * self.all_prices[m][t] * self.dt)
-                    for t in self.time_steps
-                ]
-                results_df[f'Profit_{m}'] = market_profit
-                total_profit_values += np.array(market_profit)
+                if m in self.arbitrage_markets:
+                    m_profit = (p_ds - p_ch) * self.all_prices[m] * self.dt
+                else:
+                    m_profit = (p_ds + p_ch) * self.all_prices[m] * self.dt # Availability
+                
+                results_df[f'Profit_{m}'] = m_profit
+                total_profit_values += m_profit
 
             results_df['Total Hourly Profit'] = total_profit_values
             return results_df
-            
-        else:
-            print(f"No optimal solution found. Status: {pulp.LpStatus[self.model.status]}")
-            return None
+        return None
         
     def plot_operation(self, results_df):
-        """generates a figure with stacked subplots for SOC and Hourly Profit."""
+        """Generates a figure with stacked subplots for SOC, Market Power, and Hourly Profit."""
         if results_df is None:
             print("Cannot plot; no optimal solution found.")
             return
 
-        # Create a figure and three subplots (3 rows, 1 column)
-        fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(12, 10), sharex=True)
+        fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(14, 12), sharex=True)
         
         # --- Subplot 1: State of Charge (SOC) ---
-        ax1.plot(results_df.index, results_df['SOC'], color='tab:blue', label='State of Charge', linewidth=2)
-        
-        # Add min/max SOC limits
-        ax1.axhline(self.soc_min, color='gray', linestyle='--', linewidth=1, label='Min SOC')
-        ax1.axhline(self.soc_max, color='gray', linestyle='--', linewidth=1, label='Max SOC')
-        
+        ax1.plot(results_df.index, results_df['SOC'], color='tab:blue', label='SOC', linewidth=2)
+        ax1.axhline(self.soc_min, color='red', linestyle='--', alpha=0.5, label='Min SOC')
+        ax1.axhline(self.soc_max, color='green', linestyle='--', alpha=0.5, label='Max SOC')
         ax1.set_ylabel('SOC (MWh)')
         ax1.set_title('BESS Optimal Operation Schedule', fontsize=14)
         ax1.legend(loc='upper right')
-        ax1.grid(axis='y', linestyle=':')
-        ax1.set_ylim(0, self.capacity * 1.05)
+        ax1.grid(True, linestyle=':', alpha=0.6)
 
+        # --- Subplot 2: Market Power Allocation (Stacked) ---
+        # Separating the columns for stacking
+        power_cols = [c for c in results_df.columns if 'Power_' in c]
+        
+        # We plot positive (discharge/low) and negative (charge/high) separately for clarity
+        for col in power_cols:
+            market_name = col.replace('Power_', '')
+            ax2.bar(results_df.index, results_df[col], width=self.dt/24, label=market_name, alpha=0.8)
+            
+        ax2.set_ylabel('Power (MW)')
+        ax2.set_title('Market Power Allocation (Stacking)')
+        ax2.axhline(0, color='black', linewidth=0.8)
+        ax2.legend(loc='center left', bbox_to_anchor=(1, 0.5), fontsize='small')
+        ax2.grid(True, linestyle=':', alpha=0.6)
 
-        # --- Subplot 3: Hourly Profit ---
+        # --- Subplot 3: Hourly Profit Breakdown ---
+        # Plotting the total profit as a line and shading the area
         ax3.plot(results_df.index, results_df['Total Hourly Profit'], 
-                color='tab:orange', label='Hourly Profit', linestyle='-', marker='.')
-        
-        # Shade area based on profit/loss
+                color='tab:orange', label='Total Profit', linewidth=1.5)
         ax3.fill_between(results_df.index, 0, results_df['Total Hourly Profit'], 
-                        where=(results_df['Total Hourly Profit'] > 0), 
-                        facecolor='tab:orange', alpha=0.3, interpolate=True)
-        ax3.fill_between(results_df.index, 0, results_df['Total Hourly Profit'], 
-                        where=(results_df['Total Hourly Profit'] < 0), 
-                        facecolor='tab:red', alpha=0.3, interpolate=True)
+                        color='tab:orange', alpha=0.2)
         
-        ax3.axhline(0, color='black', linewidth=0.5)
-        ax3.set_ylabel('Profit (Currency Unit)')
+        ax3.set_ylabel('Profit (Currency)')
         ax3.set_xlabel('Time Step')
-        ax3.grid(axis='y', linestyle=':')
-        ax3.legend(loc='upper left')
+        ax3.set_title('Total Operational Profit')
+        ax3.grid(True, linestyle=':', alpha=0.6)
 
         fig.tight_layout()
         plt.show()
