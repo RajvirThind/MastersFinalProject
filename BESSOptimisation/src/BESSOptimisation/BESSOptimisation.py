@@ -6,7 +6,7 @@ import matplotlib.pyplot as plt
 
 class BESS_Optimiser:
     """Mixed Ineteger Linear Programming (MILP) Optimiser for BESS Operation across multiple markets."""
-    def __init__(self, prices_df, battery_params):
+    def __init__(self, prices_df, battery_params, current_soh = 1.0, last_soc = None):
         """initialising the model parameters and input data"""
         self.arbitrage_markets = ['DayAhead', 'Intraday', 'BM', 'Imbalance']
         self.ancillary_low = ['DCDMLow', 'DRLow'] #needs discharge headroom
@@ -16,27 +16,41 @@ class BESS_Optimiser:
         self.time_steps = prices_df.index
         self.markets = self.prices_df.columns.tolist()
         self.all_prices = self.prices_df.to_dict(orient='series')
+        self.T = len(self.prices_df)
 
         #battery parameters
-        self.T = len(self.prices_df)
+        self.initial_capacity = battery_params.get('initial_capacity', 20)
+        self.soh = current_soh
+
+        #calculating available capacity based on SOH 
+        self.current_capacity = self.initial_capacity * self.soh
+
+
         self.dt = battery_params.get('time_interval', 0.5)
         self.p_max = battery_params.get('max_power', 10)
         self.rte = battery_params.get('rte', 0.9)
-        self.capacity = battery_params.get('capacity', 20)
-        self.soc_min = battery_params.get('soc_min_factor', 0.1) * self.capacity
-        self.soc_max = battery_params.get('soc_max_factor', 0.9) * self.capacity
-        self.soc_initial = battery_params.get('soc_initial_factor', 0.5) * self.capacity
+        #self.capacity = battery_params.get('capacity', 20)
+    
+        #dynamic SOC limits, must shrink as battery degrades
+        self.soc_min = battery_params.get('soc_min_factor', 0.1) * self.current_capacity
+        self.soc_max = battery_params.get('soc_max_factor', 0.9) * self.current_capacity
+
+        #is this is day 2, use the SOC from the previous day
+        if last_soc is not None:
+            self.soc_initial = last_soc
+        else:
+            self.soc_initial = battery_params.get('soc_initial_factor', 0.5) * self.current_capacity
 
         self.cycle_limit = battery_params.get('cycle_limit', 2.0) #1 cycle per day
+        self.deg_per_mwh = battery_params.get('deg_per_mwh', 0.00001) #degradation per MWh discharged
         self.charge_c_rate = battery_params.get('charge_c_rate', 1.0) #1C charge rate
         self.discharge_c_rate = battery_params.get('discharge_c_rate', 1.0) #1C discharge rate
         self.utilisation_factor = battery_params.get('utilisation_factor', 0.02)
-        self.big_M = self.p_max # Placeholder for big M formulation
+        self.big_M = self.p_max * 1.1 # Big M value for constraints
 
+        #skip rates for risk adjusted revenue
         self.skip_rates = battery_params.get('skip_rates', pd.DataFrame(0, index=self.time_steps, columns=self.markets))
 
-
-        
         self.model = pulp.LpProblem("BESS_Optimisation", pulp.LpMaximize)
 
     def define_variables(self):
@@ -106,7 +120,7 @@ class BESS_Optimiser:
 
         total_discharge_energy = []
         safe_c_rate = 0.5 
-        safe_power_limit = safe_c_rate * self.capacity
+        safe_power_limit = safe_c_rate * self.current_capacity
         alpha = self.utilisation_factor
 
         arb_mkts = ['DayAhead', 'Intraday', 'BM', 'Imbalance']
@@ -151,8 +165,8 @@ class BESS_Optimiser:
             self.model += self.is_charging[t] + self.is_discharging[t] <= 1, f"Charging_Status_{t}"
 
             # ===C-Rate Constraints ===
-            self.model += Total_Charge_t <= self.charge_c_rate * self.capacity, f"Charge_CRate_{t}"
-            self.model += Total_Discharge_t <= self.discharge_c_rate * self.capacity, f"Discharge_CRate_{t}"
+            self.model += Total_Charge_t <= self.charge_c_rate * self.current_capacity, f"Charge_CRate_{t}"
+            self.model += Total_Discharge_t <= self.discharge_c_rate * self.current_capacity, f"Discharge_CRate_{t}"
             # --- High Intensity Discharge Tracking ---
             self.model += self.high_intensity_discharge[t] >= Total_Discharge_t - safe_power_limit, f"High_Intensity_Tracking_{t}"
 
