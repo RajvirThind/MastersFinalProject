@@ -8,6 +8,11 @@ class BESS_Optimiser:
     """Mixed Ineteger Linear Programming (MILP) Optimiser for BESS Operation across multiple markets."""
     def __init__(self, prices_df, battery_params, current_soh = 1.0, last_soc = None):
         """initialising the model parameters and input data"""
+
+        if prices_df is None or prices_df.empty:
+            raise ValueError("The prices_df passed to the optimiser is None or empty. "
+                             "Check your data slicing in the simulation loop.")
+
         self.arbitrage_markets = ['DayAhead', 'Intraday', 'BM', 'Imbalance']
         self.ancillary_low = ['DCDMLow', 'DRLow'] #needs discharge headroom
         self.ancillary_high = ['DCDMHigh', 'DRHigh'] #needs charge headroom
@@ -193,19 +198,28 @@ class BESS_Optimiser:
             
 
     def solve_and_collect(self):
-        """solves the LP model and extracts the results into a DataFrame."""
+        """solves the LP model and extracts the results into a DataFrame safely."""
+        # Use a slightly more relaxed gap for speed in 10-year runs if needed
         self.model.solve(pulp.PULP_CBC_CMD(msg=False, gapRel=0.05))
 
-        if pulp.LpStatus[self.model.status] == 'Optimal':
+        # Check for Optimal or Integer Feasible status
+        if pulp.LpStatus[self.model.status] in ['Optimal', 'Feasible']:
             print(f"Profit: {pulp.value(self.model.objective):,.2f} | Cycles: {pulp.value(self.daily_cycles):.2f}")
+            
             results_df = pd.DataFrame(index=self.time_steps) 
-            results_df['SOC'] = [self.soc[t].varValue for t in self.time_steps]
+            
+            # Helper to handle None values (occurs if solver fails on a specific step)
+            get_v = lambda x: x.varValue if x.varValue is not None else 0.0
+
+            results_df['SOC'] = [get_v(self.soc[t]) for t in self.time_steps]
             
             total_profit_values = np.zeros(len(self.time_steps))
 
             for m in self.markets:
-                p_ch = np.array([self.charge[(t, m)].varValue for t in self.time_steps])
-                p_ds = np.array([self.discharge[(t, m)].varValue for t in self.time_steps])
+                # Extracting power values safely
+                p_ch = np.array([get_v(self.charge[(t, m)]) for t in self.time_steps])
+                p_ds = np.array([get_v(self.discharge[(t, m)]) for t in self.time_steps])
+                
                 results_df[f'Power_{m}'] = p_ds - p_ch
                 
                 if m in self.arbitrage_markets:
@@ -217,7 +231,14 @@ class BESS_Optimiser:
                 total_profit_values += m_profit
 
             results_df['Total Hourly Profit'] = total_profit_values
+            
+            # Crucial for SOH tracking in the 10-year loop
+            results_df['Throughput_MWh'] = [get_v(self.discharge_energy[t]) for t in self.time_steps]
+            
             return results_df
+        
+        # If the solver is Infeasible, return None so the outer loop can perform an SOC reset
+        print(f"Solver Status: {pulp.LpStatus[self.model.status]} - Skipping current period.")
         return None
         
     def plot_operation(self, results_df):
@@ -270,51 +291,40 @@ class BESS_Optimiser:
 
 
 
-prices_df = pd.read_csv("Data/GBCentralAllComplete_Prices.csv")
-prices_df = prices_df.drop(columns=['Unnamed: 0', 'WeatherYear', 'Year'], errors='ignore') #getting rid of unneccesary columns
-prices_df['Date'] = pd.to_datetime(prices_df['Date']) #making sure Date is correct format
-prices_df = prices_df.set_index('Date')
-prices_df = prices_df.head(96)  # Using a smaller dataset for quicker testing
-print(prices_df)
-battery_params = {
-    'time_interval': 0.5,  # hours
-    'max_power': 10,       # MW
-    'rte': 0.9,            # round-trip efficiency
-    'capacity': 20,        # MWh
-    'soc_min_factor': 0.1, # 10% of capacity
-    'soc_max_factor': 0.9, # 90% of capacity
-    'soc_initial_factor': 0.5, # 50% of capacity
-    'cycle_limit': 2.0     # 2 cycles per day
-}
+# prices_df = pd.read_csv("Data/GBCentralAllComplete_Prices.csv")
+# prices_df = prices_df.drop(columns=['Unnamed: 0', 'WeatherYear', 'Year'], errors='ignore') #getting rid of unneccesary columns
+# prices_df['Date'] = pd.to_datetime(prices_df['Date']) #making sure Date is correct format
+# prices_df = prices_df.set_index('Date')
+# prices_df = prices_df.head(96)  # Using a smaller dataset for quicker testing
+# print(prices_df)
+# battery_params = {
+#     'time_interval': 0.5,  # hours
+#     'max_power': 10,       # MW
+#     'rte': 0.9,            # round-trip efficiency
+#     'capacity': 20,        # MWh
+#     'soc_min_factor': 0.1, # 10% of capacity
+#     'soc_max_factor': 0.9, # 90% of capacity
+#     'soc_initial_factor': 0.5, # 50% of capacity
+#     'cycle_limit': 2.0     # 2 cycles per day
+# }
 
-optimiser = BESS_Optimiser(prices_df, battery_params)
-optimiser.define_variables()
-optimiser.set_objective()
-optimiser.set_constraints()
-results_df = optimiser.solve_and_collect()
-print(results_df.head())
+# optimiser = BESS_Optimiser(prices_df, battery_params)
+# optimiser.define_variables()
+# optimiser.set_objective()
+# optimiser.set_constraints()
+# results_df = optimiser.solve_and_collect()
+# print(results_df.head())
 
 
-if results_df is not None:
-    # Now call the new plotting method
-    optimiser.plot_operation(results_df)
+# if results_df is not None:
+#     # Now call the new plotting method
+#     optimiser.plot_operation(results_df)
 
 
 
 
 
 #improvements to be made:
-#need to ensure that SOC only moves for arbitrage, ancillary restricts how full or empty the battery can get
-#adding minimum delivery constraints
-#market block constraints (EFA blocks)
-#utilisation factor for ancillary services to address the fact the ancillary services get called occasionally 
-#include contract constraints to ensure battery meets contractual obligations
-
-
-#optional 
-#soc dependent power limits - charging rate changes as batery approaches 100%
-#piecewise linear efficiency curve where efficiency peaks at 0.5C and drops at 1.0C
-#parasitic losses 
-#depth of discharge constraints to protect battery life
+# incorporate skip rates
 
 
