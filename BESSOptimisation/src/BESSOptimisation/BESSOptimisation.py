@@ -287,44 +287,65 @@ class BESS_Optimiser:
 
         fig.tight_layout()
         plt.show()
+
+    def plot_long_term_appraisal(summary_df):
+        """Generates a multi-year view of revenue streams and battery health."""
+        # Group by month to make the chart readable over 10 years
+        summary_df['Date'] = pd.to_datetime(summary_df['Date'])
+        monthly = summary_df.resample('M', on='Date').sum()
+        monthly_soh = summary_df.resample('M', on='Date').mean()['SOH'] # Use average SOH for the line
+
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 10), sharex=True)
+
+        # --- Subplot 1: Stacked Revenue Streams ---
+        # We stack the different profit sources
+        revenue_cols = ['Arbitrage_Profit', 'Ancillary_Low_Profit', 'Ancillary_High_Profit']
+        colors = ['#1f77b4', '#2ca02c', '#ff7f0e'] # Blue, Green, Orange
         
+        ax1.stackplot(monthly.index, 
+                    [monthly[col] for col in revenue_cols],
+                    labels=['Arbitrage', 'Ancillary Low', 'Ancillary High'],
+                    colors=colors, alpha=0.8)
+        
+        ax1.set_ylabel('Monthly Profit (£)')
+        ax1.set_title('10-Year Forecasted Revenue Breakdown', fontsize=14)
+        ax1.legend(loc='upper left')
+        ax1.grid(True, linestyle=':', alpha=0.6)
 
+        # --- Subplot 2: SOH vs Cumulative Profit ---
+        ax2_twin = ax2.twinx()
+        
+        # Plot SOH (State of Health)
+        lns1 = ax2.plot(monthly.index, monthly_soh * 100, color='red', linewidth=2, label='SOH %')
+        ax2.set_ylabel('State of Health (%)', color='red')
+        ax2.tick_params(axis='y', labelcolor='red')
+        ax2.set_ylim(70, 105)
+        ax2.axhline(80, color='black', linestyle='--', alpha=0.5, label='End of Life (80%)')
 
+        # Plot Cumulative Profit
+        cum_profit = monthly['Total_Profit'].cumsum()
+        lns2 = ax2_twin.plot(monthly.index, cum_profit, color='blue', linestyle=':', label='Cum. Profit')
+        ax2_twin.set_ylabel('Cumulative Profit (£)', color='blue')
+        ax2_twin.tick_params(axis='y', labelcolor='blue')
 
-# prices_df = pd.read_csv("Data/GBCentralAllComplete_Prices.csv")
-# prices_df = prices_df.drop(columns=['Unnamed: 0', 'WeatherYear', 'Year'], errors='ignore') #getting rid of unneccesary columns
-# prices_df['Date'] = pd.to_datetime(prices_df['Date']) #making sure Date is correct format
-# prices_df = prices_df.set_index('Date')
-# prices_df = prices_df.head(96)  # Using a smaller dataset for quicker testing
-# print(prices_df)
-# battery_params = {
-#     'time_interval': 0.5,  # hours
-#     'max_power': 10,       # MW
-#     'rte': 0.9,            # round-trip efficiency
-#     'capacity': 20,        # MWh
-#     'soc_min_factor': 0.1, # 10% of capacity
-#     'soc_max_factor': 0.9, # 90% of capacity
-#     'soc_initial_factor': 0.5, # 50% of capacity
-#     'cycle_limit': 2.0     # 2 cycles per day
-# }
+        ax2.set_title('Battery Degradation and Cumulative Wealth')
+        ax2.set_xlabel('Year')
+        
+        # Merging legends for the twin axis
+        lns = lns1 + lns2
+        labs = [l.get_label() for l in lns]
+        ax2.legend(lns, labs, loc='upper left')
 
-# optimiser = BESS_Optimiser(prices_df, battery_params)
-# optimiser.define_variables()
-# optimiser.set_objective()
-# optimiser.set_constraints()
-# results_df = optimiser.solve_and_collect()
-# print(results_df.head())
-
-
-# if results_df is not None:
-#     # Now call the new plotting method
-#     optimiser.plot_operation(results_df)
-
+        plt.tight_layout()
+        plt.show()
+        
 
 
 
 
 #improvements to be made:
 # incorporate skip rates
-
-
+# consider non linear battery degradation
+# add payback period and IRR graphs 
+# state of charge in 30 minute intervals to analyse battery operation 
+# look at this link for reference: https://www.macquarie.com/hk/en/about/company/macquarie-asset-management/institutional/insights/battery-storage-strategies-for-revenue-stacking-and-investment-success.html

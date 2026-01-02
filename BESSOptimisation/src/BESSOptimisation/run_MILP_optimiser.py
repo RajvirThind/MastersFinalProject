@@ -1,6 +1,9 @@
 import pandas as pd
 import numpy as np 
 from BESSOptimisation import BESS_Optimiser
+from utils import plot_long_term_appraisal
+
+
 
 def simulate_bess_operation():
     print("Loading price data...")
@@ -24,7 +27,9 @@ def simulate_bess_operation():
 
     current_soh = 1.0
     last_soc = battery_params['soc_initial_factor'] * battery_params['capacity']
-    daily_summaries = []
+
+    daily_summaries = [] #for long term summary
+    dispatch_data_list = [] #for half hourly data
 
     steps_per_day = 48
     lookahead_steps = 8 # 4-hour lookahead
@@ -67,15 +72,29 @@ def simulate_bess_operation():
                 'Throughput_MWh': daily_throughput,
                 'Capacity_MWh': opt.current_capacity
             })
+
+            dispatch_cols = ['SOC', 'Throughput_MWh', 'Total Hourly Profit'] + \
+                            [c for c in comm_res.columns if 'Power_' in c]
+            dispatch_data_list.append(comm_res[dispatch_cols])
+
         else:
             print(f"Day starting {day_df.index[0]} Infeasible. Resetting SOC to 50%.")
             last_soc = (battery_params['capacity'] * current_soh) * 0.5
             daily_summaries.append({'Date': day_df.index[0], 'Profit': 0, 'SOH': current_soh, 'Throughput_MWh': 0})
 
-    # 3. Export
+
+    # daily export summary
     summary_df = pd.DataFrame(daily_summaries)
-    summary_df.to_csv("Data/Ten_Year_Appraisal_Summary.csv", index=False)
+    summary_df.to_csv("Data/Long_Term_Appraisal_Summary.csv", index=False)
     print("Simulation Complete.")
+
+    # half hourly summary
+    full_dispatch_df = pd.concat(dispatch_data_list)
+    full_dispatch_df.to_parquet("Data/Long_Term_Appraisal_Dispatch.parquet")
+    print("Dispatch data saved.")
+
+    # Plotting
+    plot_long_term_appraisal(summary_df)
 
 if __name__ == "__main__":
     simulate_bess_operation()
