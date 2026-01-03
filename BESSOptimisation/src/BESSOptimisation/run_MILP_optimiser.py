@@ -1,7 +1,7 @@
 import pandas as pd
 import numpy as np 
 from BESSOptimisation import BESS_Optimiser
-from utils import plot_long_term_appraisal
+from utils import *
 
 
 
@@ -39,6 +39,10 @@ def simulate_bess_operation():
         if (end_idx - start_idx) < steps_per_day: break
         
         day_df = full_price_df.iloc[start_idx:end_idx]
+
+        current_markets = day_df.columns.tolist()
+        daily_skip_matrix = generate_block_skip_matrix(day_df, current_markets, p_skip=0.02)
+        battery_params['skip_rates'] = daily_skip_matrix
         
         # 1. Instantiate and Solve
         opt = BESS_Optimiser(day_df, battery_params, current_soh, last_soc)
@@ -73,7 +77,7 @@ def simulate_bess_operation():
                 'Capacity_MWh': opt.current_capacity
             })
 
-            dispatch_cols = ['SOC', 'Throughput_MWh', 'Total Hourly Profit'] + \
+            dispatch_cols = ['SOC', 'Throughput_MWh', 'Total Hourly Profit', 'Arbitrage_Profit', 'Ancillary_Low_Profit', 'Ancillary_High_Profit'] + \
                             [c for c in comm_res.columns if 'Power_' in c]
             dispatch_data_list.append(comm_res[dispatch_cols])
 
@@ -95,6 +99,8 @@ def simulate_bess_operation():
 
     # Plotting
     plot_long_term_appraisal(summary_df)
+    plot_soc_preview(full_dispatch_df)
+
 
 if __name__ == "__main__":
     simulate_bess_operation()

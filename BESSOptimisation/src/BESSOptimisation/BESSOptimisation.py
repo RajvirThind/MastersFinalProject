@@ -147,6 +147,7 @@ class BESS_Optimiser:
                     self.model += self.discharge[(next_t, m)] == self.discharge[(first_t, m)], f"EFA_Block_Ds_{m}_{next_t}"
 
 
+
         for t in self.time_steps:
 
             # Total energy actually traded (arbitrage)
