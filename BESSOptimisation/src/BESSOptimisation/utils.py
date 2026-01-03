@@ -1,5 +1,6 @@
 import matplotlib.pyplot as plt
 import pandas as pd
+import numpy as np
 
 
 
@@ -60,3 +61,45 @@ def plot_long_term_appraisal(summary_df):
 
     plt.tight_layout()
     plt.show()
+
+def plot_soc_preview(dispatch_df):
+    """Plots the State of Charge (SOC) preview from the dispatch DataFrame."""
+    if dispatch_df is None or dispatch_df.empty:
+        print("Dispatch DataFrame is empty. Cannot plot SOC preview.")
+        return
+    first_week_preview_df = dispatch_df.head(336)  # First Week
+    last_week_preview_df = dispatch_df.tail(336)  # Last Week
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10))
+
+    # Plotting first week preview
+    ax1.plot(first_week_preview_df.index, first_week_preview_df['SOC'], label='SOC', color='blue', marker='o')
+    ax1.set_title('State of Charge (SOC) - First Week')
+    ax1.set_ylabel('SOC (MWh)')
+    ax1.grid(True)
+    ax1.legend()
+
+    # Plotting last week preview
+    ax2.plot(last_week_preview_df.index, last_week_preview_df['SOC'], label='SOC', color='blue', marker='o')
+    ax2.set_title('State of Charge (SOC) - Last Week')
+    ax2.set_ylabel('SOC (MWh)')
+    ax2.grid(True)
+    ax2.legend()
+
+    plt.tight_layout()
+    plt.show()
+
+def generate_block_skip_matrix(df, markets, p_skip=0.02, block_size=8):
+    """
+    Ensures that if a skip happens, it lasts for the whole 4-hour block.
+    """
+    skip_df = pd.DataFrame(0, index=df.index, columns=markets)
+    
+    # Iterate through each 4-hour window
+    for start in range(0, len(df), block_size):
+        for m in markets:
+            # Determine if this specific market block is skipped
+            if np.random.rand() < p_skip:
+                end = min(start + block_size, len(df))
+                skip_df.iloc[start:end, skip_df.columns.get_loc(m)] = 1
+                
+    return skip_df
