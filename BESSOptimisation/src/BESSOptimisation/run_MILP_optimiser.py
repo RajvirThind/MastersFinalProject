@@ -8,7 +8,7 @@ from utils import *
 def simulate_bess_operation():
     print("Loading price data...")
     full_price_df = pd.read_csv('data/GBCentralAllComplete_Prices.csv')
-    full_price_df = full_price_df.head(1440)
+    full_price_df = full_price_df.head(2880)
     full_price_df["Date"] = pd.to_datetime(full_price_df["Date"])
     full_price_df.set_index("Date", inplace=True)
 
@@ -20,7 +20,7 @@ def simulate_bess_operation():
         'soc_min_factor': 0.1,
         'soc_max_factor': 0.9,
         'soc_initial_factor': 0.5,
-        'cycle_limit': 2.0,
+        'cycle_limit': 1.1, # cycle limit to 1.1 per day based on information by modo energy: https://modoenergy.com/research/en/gb-battery-energy-storage-cycle-value-uplift-aug-2024
         'deg_per_mwh': 0.00001, # Loss in SOH per MWh discharged
         'utilisation_factor': 0.02
     }
@@ -32,7 +32,7 @@ def simulate_bess_operation():
     dispatch_data_list = [] #for half hourly data
 
     steps_per_day = 48
-    lookahead_steps = 8 # 4-hour lookahead
+    lookahead_steps = 48 # one day lookahead
 
     for start_idx in range(0, len(full_price_df), steps_per_day):
         end_idx = min(start_idx + steps_per_day + lookahead_steps, len(full_price_df))
@@ -41,7 +41,7 @@ def simulate_bess_operation():
         day_df = full_price_df.iloc[start_idx:end_idx]
 
         current_markets = day_df.columns.tolist()
-        daily_skip_matrix = generate_block_skip_matrix(day_df, current_markets, p_skip=0.02)
+        daily_skip_matrix = generate_hybrid_skip_matrix(day_df, current_markets, p_site_fault=0.005, p_ancillary_fault=0.02, block_size=8)
         battery_params['skip_rates'] = daily_skip_matrix
         
         # 1. Instantiate and Solve
@@ -74,10 +74,10 @@ def simulate_bess_operation():
                 'Ancillary_High_Profit': anc_high_profit,
                 'SOH': current_soh,
                 'Throughput_MWh': daily_throughput,
-                'Capacity_MWh': opt.current_capacity
+                'Capacity_MWh': 20 * current_soh
             })
 
-            dispatch_cols = ['SOC', 'Throughput_MWh', 'Total Hourly Profit', 'Arbitrage_Profit', 'Ancillary_Low_Profit', 'Ancillary_High_Profit'] + \
+            dispatch_cols = ['SOC', 'Throughput_MWh' ] + \
                             [c for c in comm_res.columns if 'Power_' in c]
             dispatch_data_list.append(comm_res[dispatch_cols])
 

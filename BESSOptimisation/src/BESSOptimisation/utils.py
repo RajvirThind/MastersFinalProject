@@ -88,18 +88,26 @@ def plot_soc_preview(dispatch_df):
     plt.tight_layout()
     plt.show()
 
-def generate_block_skip_matrix(df, markets, p_skip=0.02, block_size=8):
+def generate_hybrid_skip_matrix(df, markets, p_site_fault=0.005, p_ancillary_fault=0.02, block_size=8):
     """
-    Ensures that if a skip happens, it lasts for the whole 4-hour block.
+    Implements a hybrid skip logic:
+    1. Site-wide faults: Battery is offline for ALL markets (Arbitrage + Ancillary).
+    2. Ancillary-specific faults: Battery skips only ancillary markets.
     """
     skip_df = pd.DataFrame(0, index=df.index, columns=markets)
+    ancillary_markets = ['DCDMLow', 'DRLow', 'DCDMHigh', 'DRHigh']
     
-    # Iterate through each 4-hour window
     for start in range(0, len(df), block_size):
-        for m in markets:
-            # Determine if this specific market block is skipped
-            if np.random.rand() < p_skip:
-                end = min(start + block_size, len(df))
-                skip_df.iloc[start:end, skip_df.columns.get_loc(m)] = 1
+        end = min(start + block_size, len(df))
+
+        # site wide outage, all markets
+        if np.random.rand() < p_site_fault:
+            skip_df.iloc[start:end, :] = 1
+            continue  
+            
+        # category wide ancillary outage
+        if np.random.rand() < p_ancillary_fault:
+            cols_to_skip = [m for m in markets if m in ancillary_markets] # identify columns that are in the ancillary list
+            skip_df.loc[df.index[start:end], cols_to_skip] = 1
                 
     return skip_df
