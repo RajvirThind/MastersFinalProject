@@ -88,18 +88,34 @@ def plot_soc_preview(dispatch_df):
     plt.tight_layout()
     plt.show()
 
-def generate_block_skip_matrix(df, markets, p_skip=0.02, block_size=8):
+def generate_hybrid_skip_matrix(df, markets, p_site_fault=0.005, p_ancillary_fault=0.02, p_bm_skip=0.80, block_size=8):
     """
-    Ensures that if a skip happens, it lasts for the whole 4-hour block.
+    Implements a hybrid skip logic with specific BM constraints:
+    1. Site-wide faults: Battery offline for ALL markets.
+    2. Ancillary-specific faults: Battery skips only ancillary markets.
+    3. BM Skip Rate: 80% chance of being bypassed by the ESO Control Room.
     """
     skip_df = pd.DataFrame(0, index=df.index, columns=markets)
+    ancillary_markets = ['DCDMLow', 'DRLow', 'DCDMHigh', 'DRHigh']
     
-    # Iterate through each 4-hour window
     for start in range(0, len(df), block_size):
-        for m in markets:
-            # Determine if this specific market block is skipped
-            if np.random.rand() < p_skip:
-                end = min(start + block_size, len(df))
-                skip_df.iloc[start:end, skip_df.columns.get_loc(m)] = 1
+        end = min(start + block_size, len(df))
+        current_indices = df.index[start:end]
+
+        # 1. Site-wide outage (All markets)
+        if np.random.rand() < p_site_fault:
+            skip_df.loc[current_indices, :] = 1
+            continue  
+            
+        # 2. Category-wide ancillary outage (DCDM, DR)
+        if np.random.rand() < p_ancillary_fault:
+            cols_to_skip = [m for m in markets if m in ancillary_markets]
+            skip_df.loc[current_indices, cols_to_skip] = 1
+        
+        # 3. Balancing Mechanism (BM) specific skip rate
+        # This applies an 80% skip rate specifically to the BM market
+        if 'BM' in markets:
+            if np.random.rand() < p_bm_skip:
+                skip_df.loc[current_indices, 'BM'] = 1
                 
     return skip_df

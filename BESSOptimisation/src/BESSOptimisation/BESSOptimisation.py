@@ -24,7 +24,7 @@ class BESS_Optimiser:
         self.T = len(self.prices_df)
 
         #battery parameters
-        self.initial_capacity = battery_params.get('initial_capacity', 20)
+        self.initial_capacity = battery_params.get('capacity', 20)
         self.soh = current_soh
 
         #calculating available capacity based on SOH 
@@ -46,7 +46,7 @@ class BESS_Optimiser:
         else:
             self.soc_initial = battery_params.get('soc_initial_factor', 0.5) * self.current_capacity
 
-        self.cycle_limit = battery_params.get('cycle_limit', 2.0) #1 cycle per day
+        self.cycle_limit = battery_params.get('cycle_limit', 1.1) #cycles per day
         self.deg_per_mwh = battery_params.get('deg_per_mwh', 0.00001) #degradation per MWh discharged
         self.charge_c_rate = battery_params.get('charge_c_rate', 1.0) #1C charge rate
         self.discharge_c_rate = battery_params.get('discharge_c_rate', 1.0) #1C discharge rate
@@ -69,7 +69,7 @@ class BESS_Optimiser:
                                          lowBound=self.soc_min, upBound=self.soc_max, cat='Continuous')
         self.is_charging = pulp.LpVariable.dicts("is_charging", self.time_steps, cat='Binary')
         self.is_discharging = pulp.LpVariable.dicts("is_discharging", self.time_steps, cat='Binary')
-        self.daily_cycles = pulp.LpVariable("daily_cycles", lowBound=0, upBound=self.cycle_limit, cat='Continuous') #creating a variable for daily throughput cycles
+        self.daily_cycles = pulp.LpVariable("daily_cycles", lowBound=0, cat='Continuous') #creating a variable for daily throughput cycles
         self.discharge_energy = pulp.LpVariable.dicts("discharge_energy", self.time_steps, lowBound=0, cat='Continuous') #variable to track energy discharged each time step
         self.high_intensity_discharge = pulp.LpVariable.dicts("high_intensity_discharge", self.time_steps, lowBound=0, cat='Continuous') #variable to track high intensity discharge
 
@@ -150,6 +150,11 @@ class BESS_Optimiser:
 
         for t in self.time_steps:
 
+            for m in self.markets:
+                # If skip_rates is 1, (1-1)=0, forcing charge/discharge to 0
+                self.model += self.charge[(t, m)] <= self.p_max * (1 - self.skip_rates.loc[t, m]), f"Skip_Ch_Limit_{t}_{m}"
+                self.model += self.discharge[(t, m)] <= self.p_max * (1 - self.skip_rates.loc[t, m]), f"Skip_Ds_Limit_{t}_{m}"
+
             # Total energy actually traded (arbitrage)
             step_arb_charge = pulp.lpSum(self.charge[(t, m)] for m in arb_mkts)
             step_arb_discharge = pulp.lpSum(self.discharge[(t, m)] for m in arb_mkts)
@@ -195,7 +200,16 @@ class BESS_Optimiser:
 
 
         usable_capacity = self.soc_max - self.soc_min
-        self.model += pulp.lpSum(total_discharge_energy) <= self.daily_cycles * usable_capacity, f"Global_Daily_Cycle_Limit_{t}"
+        # Calculate the number of days in this optimisation window
+        num_days_in_window = (len(self.time_steps) * self.dt) / 24
+        
+
+        total_cycle_budget = self.cycle_limit * num_days_in_window
+        
+        self.model += pulp.lpSum(total_discharge_energy) <= total_cycle_budget * usable_capacity, "Global_Cycle_Limit_Constraint"
+        
+        # This link ensures the terminal printout 'Cycles: X' shows the average daily cycles
+        self.model += self.daily_cycles == pulp.lpSum(total_discharge_energy) / usable_capacity / num_days_in_window
             
 
     def solve_and_collect(self):
@@ -345,8 +359,10 @@ class BESS_Optimiser:
 
 
 #improvements to be made:
-# incorporate skip rates
 # consider non linear battery degradation
-# add payback period and IRR graphs 
-# state of charge in 30 minute intervals to analyse battery operation 
+# add payback period and IRR graphs, need to estimate price/MW for battery installation
+# daily profit seems high considering modo energy has provided figures of £250/MW per day: https://www.solarpowerportal.co.uk/battery-storage/british-bess-earns-second-highest-daily-total-price-for-2024
 # look at this link for reference: https://www.macquarie.com/hk/en/about/company/macquarie-asset-management/institutional/insights/battery-storage-strategies-for-revenue-stacking-and-investment-success.html
+
+#research prices
+# look into current battery installation costs 
