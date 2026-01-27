@@ -59,163 +59,191 @@ class BESS_Optimiser:
         self.model = pulp.LpProblem("BESS_Optimisation", pulp.LpMaximize)
 
     def define_variables(self):
-        """setting up linear programming decision variables"""
+        """Setting up linear programming decision variables with Integer and Binary types."""
         charge_discharge_indices = [(t, m) for t in self.time_steps for m in self.markets]
+        
+        # 1. Existing Power and Status Variables
         self.charge = pulp.LpVariable.dicts("charge", charge_discharge_indices, 
                                             lowBound=0, upBound=self.p_max, cat='Continuous') 
         self.discharge = pulp.LpVariable.dicts("discharge", charge_discharge_indices, 
-                                               lowBound=0, upBound=self.p_max, cat='Continuous')
-        self.soc = pulp.LpVariable.dicts("soc", self.time_steps, 
-                                         lowBound=self.soc_min, upBound=self.soc_max, cat='Continuous')
+                                            lowBound=0, upBound=self.p_max, cat='Continuous')
         self.is_charging = pulp.LpVariable.dicts("is_charging", self.time_steps, cat='Binary')
         self.is_discharging = pulp.LpVariable.dicts("is_discharging", self.time_steps, cat='Binary')
-        self.daily_cycles = pulp.LpVariable("daily_cycles", lowBound=0, cat='Continuous') #creating a variable for daily throughput cycles
-        self.discharge_energy = pulp.LpVariable.dicts("discharge_energy", self.time_steps, lowBound=0, cat='Continuous') #variable to track energy discharged each time step
-        self.high_intensity_discharge = pulp.LpVariable.dicts("high_intensity_discharge", self.time_steps, lowBound=0, cat='Continuous') #variable to track high intensity discharge
+        
+        # 2. Existing SOC and Throughput Variables
+        self.soc = pulp.LpVariable.dicts("soc", self.time_steps, 
+                                        lowBound=self.soc_min, upBound=self.soc_max, cat='Continuous')
+        self.discharge_energy = pulp.LpVariable.dicts("discharge_energy", self.time_steps, lowBound=0)
+        self.daily_cycles = pulp.LpVariable("daily_cycles", lowBound=0)
+        self.high_intensity_discharge = pulp.LpVariable.dicts("high_intensity_discharge", self.time_steps, lowBound=0)
 
+        # 3. NEW: Ancillary Logic Variables (Integer MW and Min Capacity)
+        anc_indices = [(t, m) for t in self.time_steps for m in (self.ancillary_low + self.ancillary_high)]
+        self.anc_mw = pulp.LpVariable.dicts("anc_mw", anc_indices, lowBound=0, upBound=self.p_max, cat='Integer')
+        self.anc_active = pulp.LpVariable.dicts("anc_active", anc_indices, cat='Binary')
+
+        # 4. NEW: Piecewise Linear SOC (Safe vs. Stress zones)
+        self.soc_safe = pulp.LpVariable.dicts("soc_safe", self.time_steps, lowBound=0)
+        self.soc_stress = pulp.LpVariable.dicts("soc_stress", self.time_steps, lowBound=0)
+
+        
 
     def set_objective(self):
         """
-        Defining objective function: 
-        1. Maximize Energy Profit (Arbitrage)
-        2. Maximize Availability Revenue (Ancillary)
-        3. Subtract Degradation Costs (Standard + High C-Rate Penalty)
+        Defining the objective function to maximize net profit while internalizing:
+        1. Piecewise Linear Degradation (Stress vs. Safe SOC zones)
+        2. High C-Rate (Intensity) wear and tear
+        3. Balancing Mechanism (BM) skip-rate risk weighting
         """
-        # Define Market Groups
-        arbitrage_markets = ['DayAhead', 'Intraday', 'BM', 'Imbalance']
-        ancillary_markets = ['DCDMLow', 'DCDMHigh', 'DRLow', 'DRHigh']
+        # --- 1. Market Revenue Streams ---
         
-        # 1. Arbitrage Profit (Energy Traded)
-        # Revenue = (Discharge - Charge) * Price * Time
+        # Arbitrage (DayAhead, Intraday, Imbalance)
+        # Excludes BM here to apply specific risk weighting below
+        arb_basic = ['DayAhead', 'Intraday', 'Imbalance']
         arbitrage_profit = pulp.lpSum(
             (self.discharge[(t, m)] - self.charge[(t, m)]) * self.all_prices[m][t] * self.dt
-            for t in self.time_steps for m in arbitrage_markets
+            for t in self.time_steps for m in arb_basic
         )
 
-        # 2. Ancillary Revenue with Skip Rate Penalty (Availability)
-        # Revenue = Reserved Power * (Price - Penalty * SkipRate)
-        penalty_weight = 10.0 # Adjust based on risk tolerance
+        # Balancing Mechanism (BM) with 80% Skip-Rate Weighted Revenue
+        # We penalize the 'expected' revenue to reflect that most bids are ignored
+        bm_profit = pulp.lpSum(
+            (self.discharge[(t, 'BM')] - self.charge[(t, 'BM')]) * self.all_prices['BM'][t] * (1 - self.skip_rates.loc[t, 'BM']) * self.dt
+            for t in self.time_steps
+        )
+
+        # Ancillary Revenue (Availability)
+        # Revenue = MW * (£/MW/h) * Time
         ancillary_revenue = pulp.lpSum(
-            (self.discharge[(t, m)] + self.charge[(t, m)]) * (self.all_prices[m][t] - penalty_weight * self.skip_rates.loc[t, m]) * self.dt
+            (self.discharge[(t, m)] + self.charge[(t, m)]) * self.all_prices[m][t] * self.dt
             for t in self.time_steps for m in (self.ancillary_low + self.ancillary_high)
         )
 
-        # 3. Degradation & Penalty Costs
-        standard_deg_cost = 5.0   # £/MWh of throughput
-        high_c_penalty = 15.0     # Extra £/MWh for high intensity use
+        # --- 2. Cost & Penalty Terms (Internalizing Degradation) ---
         
-        # Standard throughput wear (on total arbitrage discharge)
+        # A. Standard Throughput Cost (£/MWh)
+        # Reflects the 'Levelized Cost of Storage' (LCOS) wear-and-tear
+        # In 2026, standard LFP wear is roughly £5.00 - £8.00 per MWh discharged
+        standard_deg_cost = 6.50   
         deg_cost = pulp.lpSum(
-            pulp.lpSum(self.discharge[(t, m)] for m in arbitrage_markets) * self.dt * standard_deg_cost
+            self.discharge_energy[t] * standard_deg_cost for t in self.time_steps
+        )
+
+        # B. Piecewise Linear Stress Penalty
+        # Penalizes the battery for sitting in or moving through high/low SOC zones (<20% or >80%)
+        # This mimics accelerated chemical degradation at SOC extremes.
+        stress_penalty_rate = 12.00 # Extra £ per MWh equivalent sitting in stress zone
+        stress_cost = pulp.lpSum(
+            self.soc_stress[t] * stress_penalty_rate * self.dt for t in self.time_steps
+        )
+
+        # C. C-Rate / High Intensity Penalty
+        # Extra wear-and-tear for discharging above 0.5C (e.g., fast 1C bursts)
+        high_c_penalty_rate = 15.00 # £ per MWh for high-power usage
+        intensity_cost = pulp.lpSum(
+            self.high_intensity_discharge[t] * self.dt * high_c_penalty_rate
             for t in self.time_steps
         )
+
+        # --- 3. Final Objective Function ---
+        # Maximize: (Total Revenue) - (Total Internalized Costs)
+        total_revenue = arbitrage_profit + bm_profit + ancillary_revenue
+        total_costs = deg_cost + stress_cost + intensity_cost
         
-        # C-Rate penalty (calculated in set_constraints)
-        penalty_cost = pulp.lpSum(
-            self.high_intensity_discharge[t] * self.dt * high_c_penalty
-            for t in self.time_steps
-        )
-
-        # Final Objective: Maximize Net Profit
-        self.model += (arbitrage_profit + ancillary_revenue) - (deg_cost + penalty_cost), "Total_Net_Profit"
-
+        self.model += total_revenue - total_costs, "Total_Net_Profit"
 
     def set_constraints(self):
-        """applies all physical and operational constraints to the model"""
-
+        """
+        Applies all physical, operational, and contractual constraints to the model.
+        Ensures EFA blocks, 1MW minimums, whole MW bids, and SOC duration safety.
+        """
         total_discharge_energy = []
         safe_c_rate = 0.5 
         safe_power_limit = safe_c_rate * self.current_capacity
         alpha = self.utilisation_factor
+        
+        # Piecewise SOC Thresholds (Stress Zone < 20% or > 80%)
+        safe_lower_threshold = 0.20 * self.current_capacity
+        safe_upper_threshold = 0.80 * self.current_capacity
+        
+        # 2026 Delivery Durations (Hours)
+        durations = {
+            'DCDMLow': 0.25, 'DCDMHigh': 0.25, # 15 mins for DC
+            'DRLow': 1.0, 'DRHigh': 1.0        # 60 mins for DR
+        }
 
-        arb_mkts = ['DayAhead', 'Intraday', 'BM', 'Imbalance']
-        anc_low_mkts = ['DCDMLow', 'DRLow']   # Export/Discharge services
-        anc_high_mkts = ['DCDMHigh', 'DRHigh'] # Import/Charge services
-
-        # EFA block constraints (4 hour locks for ancillary services)
-        # 4 hours = 8 steps (since dt = 0.5 hours)
+        # === 1. EFA Block Constraints (4-hour locks) ===
         steps_per_block = int(4 / self.dt)
-
         for block_start in range(0, len(self.time_steps), steps_per_block):
-            block_indices = self.time_steps[block_start: block_start + steps_per_block]
+            block_indices = self.time_steps[block_start : block_start + steps_per_block]
             first_t = block_indices[0]
-
-            for m in (anc_low_mkts + anc_high_mkts):
+            for m in (self.ancillary_low + self.ancillary_high):
                 for next_t in block_indices[1:]:
-                    # Force all steps in the block to have the same power for market m
                     self.model += self.charge[(next_t, m)] == self.charge[(first_t, m)], f"EFA_Block_Ch_{m}_{next_t}"
                     self.model += self.discharge[(next_t, m)] == self.discharge[(first_t, m)], f"EFA_Block_Ds_{m}_{next_t}"
 
-
-
         for t in self.time_steps:
-
-            for m in self.markets:
-                # If skip_rates is 1, (1-1)=0, forcing charge/discharge to 0
-                self.model += self.charge[(t, m)] <= self.p_max * (1 - self.skip_rates.loc[t, m]), f"Skip_Ch_Limit_{t}_{m}"
-                self.model += self.discharge[(t, m)] <= self.p_max * (1 - self.skip_rates.loc[t, m]), f"Skip_Ds_Limit_{t}_{m}"
-
-            # Total energy actually traded (arbitrage)
-            step_arb_charge = pulp.lpSum(self.charge[(t, m)] for m in arb_mkts)
-            step_arb_discharge = pulp.lpSum(self.discharge[(t, m)] for m in arb_mkts)
-
-            # Total reserve commited (ancillary)
-            step_anc_high = pulp.lpSum(self.charge[(t, m)] for m in anc_high_mkts)
-            step_anc_low = pulp.lpSum(self.discharge[(t, m)] for m in anc_low_mkts)
+            # Market Summation
+            step_arb_charge = pulp.lpSum(self.charge[(t, m)] for m in self.arbitrage_markets)
+            step_arb_discharge = pulp.lpSum(self.discharge[(t, m)] for m in self.arbitrage_markets)
+            step_anc_high = pulp.lpSum(self.charge[(t, m)] for m in self.ancillary_high)
+            step_anc_low = pulp.lpSum(self.discharge[(t, m)] for m in self.ancillary_low)
 
             Total_Charge_t = step_arb_charge + step_anc_high
             Total_Discharge_t = step_arb_discharge + step_anc_low
 
-            #Total combined power must not exceed p_max -> you cannot sell your max power to DayAhead and to DR at the same time    
+            # --- Power Limits & Binary Exclusivity ---
             self.model += Total_Charge_t <= self.p_max, f"Max_Total_Charge_Power_{t}"
             self.model += Total_Discharge_t <= self.p_max, f"Max_Total_Discharge_Power_{t}"
-            
-            # --- Mutual Exclusivity and Binary Links ---
             self.model += Total_Charge_t <= self.is_charging[t] * self.big_M, f"Charge_Exclusive_{t}"
             self.model += Total_Discharge_t <= self.is_discharging[t] * self.big_M, f"Discharge_Exclusive_{t}"
             self.model += self.is_charging[t] + self.is_discharging[t] <= 1, f"Charging_Status_{t}"
 
-            # ===C-Rate Constraints ===
-            self.model += Total_Charge_t <= self.charge_c_rate * self.current_capacity, f"Charge_CRate_{t}"
-            self.model += Total_Discharge_t <= self.discharge_c_rate * self.current_capacity, f"Discharge_CRate_{t}"
-            # --- High Intensity Discharge Tracking ---
-            self.model += self.high_intensity_discharge[t] >= Total_Discharge_t - safe_power_limit, f"High_Intensity_Tracking_{t}"
+            # --- Ancillary Specific: Whole MW & 1 MW Minimum ---
+            for m in (self.ancillary_low + self.ancillary_high):
+                self.model += self.charge[(t, m)] == self.anc_mw[(t, m)], f"Whole_MW_Ch_{t}_{m}"
+                self.model += self.discharge[(t, m)] == self.anc_mw[(t, m)], f"Whole_MW_Ds_{t}_{m}"
+                # Min 1MW logic: Power >= 1 * Binary
+                self.model += self.anc_mw[(t, m)] >= 1 * self.anc_active[(t, m)], f"Min_Cap_Low_{t}_{m}"
+                self.model += self.anc_mw[(t, m)] <= self.p_max * self.anc_active[(t, m)], f"Min_Cap_High_{t}_{m}"
 
-            # --- Energy Balance (SOC Dynamics) ---
+            # --- Piecewise SOC Degradation Logic ---
+            self.model += self.soc[t] == self.soc_safe[t] + self.soc_stress[t], f"SOC_Composition_{t}"
+            self.model += self.soc_safe[t] <= (safe_upper_threshold - safe_lower_threshold), f"Safe_SOC_Limit_{t}"
+
+            # --- Energy Balance (Utilization-Adjusted) ---
             t_loc = self.prices_df.index.get_loc(t)
             soc_prev = self.soc_initial if t_loc == 0 else self.soc[self.time_steps[t_loc - 1]]
-
-            # SOC moves firm for Arbitrage, and slightly (alpha) for Ancillary
+            
             energy_in = (step_arb_charge + (alpha * step_anc_high)) * self.rte * self.dt
             energy_out = (step_arb_discharge + (alpha * step_anc_low)) / self.rte * self.dt
             self.model += self.soc[t] == soc_prev + energy_in - energy_out, f"Energy_Balance_{t}"
 
-            self.model += self.soc[t] >= self.soc_min + (step_anc_low * 0.5), f"Ancillary_Footroom_{t}" #ensure we have enough energy to discharge if an ancillary low service is called 
-            self.model += self.soc[t] <= self.soc_max - (step_anc_high * 0.5), f"Ancillary_Headroom_{t}" #ensure we have enough energy to charge if an ancillary high service is called
-            #0.5 is used which represents a 30 minute full power delivery requirement
+            # --- Advanced Delivery Duration (Safety Buffer) ---
+            # Summing (Power * Required_Duration_Hours) for each active service
+            anc_low_energy_req = pulp.lpSum(self.discharge[(t, m)] * durations.get(m, 0.5) for m in self.ancillary_low)
+            anc_high_energy_req = pulp.lpSum(self.charge[(t, m)] * durations.get(m, 0.5) for m in self.ancillary_high)
 
-            # === Daily Cycle Limit ===
+            self.model += self.soc[t] >= self.soc_min + (anc_low_energy_req / self.rte), f"Ancillary_Footroom_{t}"
+            self.model += self.soc[t] <= self.soc_max - (anc_high_energy_req * self.rte), f"Ancillary_Headroom_{t}"
+
+            # High Intensity Tracking & Cycle Budget
+            self.model += self.high_intensity_discharge[t] >= Total_Discharge_t - safe_power_limit, f"High_Intensity_Tracking_{t}"
             self.model += self.discharge_energy[t] == energy_out, f"Discharge_Energy_Calc_{t}"
             total_discharge_energy.append(self.discharge_energy[t])
 
-
+        # === Global Cycle Budget ===
         usable_capacity = self.soc_max - self.soc_min
-        # Calculate the number of days in this optimisation window
         num_days_in_window = (len(self.time_steps) * self.dt) / 24
-        
-
         total_cycle_budget = self.cycle_limit * num_days_in_window
-        
         self.model += pulp.lpSum(total_discharge_energy) <= total_cycle_budget * usable_capacity, "Global_Cycle_Limit_Constraint"
-        
-        # This link ensures the terminal printout 'Cycles: X' shows the average daily cycles
         self.model += self.daily_cycles == pulp.lpSum(total_discharge_energy) / usable_capacity / num_days_in_window
             
 
     def solve_and_collect(self):
         """solves the LP model and extracts the results into a DataFrame safely."""
         # Use a slightly more relaxed gap for speed in 10-year runs if needed
-        self.model.solve(pulp.PULP_CBC_CMD(msg=False, gapRel=0.05))
+        self.model.solve(pulp.PULP_CBC_CMD(msg=False, gapRel=0.2))
 
         # Check for Optimal or Integer Feasible status
         if pulp.LpStatus[self.model.status] in ['Optimal', 'Feasible']:
