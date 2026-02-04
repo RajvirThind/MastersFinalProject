@@ -3,6 +3,7 @@ import pulp
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
+import numpy_financial as npf
 
 class BESS_Optimiser:
     """Mixed Ineteger Linear Programming (MILP) Optimiser for BESS Operation across multiple markets."""
@@ -84,9 +85,7 @@ class BESS_Optimiser:
 
         # 4. NEW: Piecewise Linear SOC (Safe vs. Stress zones)
         self.soc_safe = pulp.LpVariable.dicts("soc_safe", self.time_steps, lowBound=0)
-        self.soc_stress = pulp.LpVariable.dicts("soc_stress", self.time_steps, lowBound=0)
-
-        
+        self.soc_stress = pulp.LpVariable.dicts("soc_stress", self.time_steps, lowBound=0)        
 
     def set_objective(self):
         """
@@ -381,8 +380,92 @@ class BESS_Optimiser:
 
         plt.tight_layout()
         plt.show()
-        
 
+    def plot_financial_appraisal(summary_df, battery_params):
+        # --- 1. Parameters & Assumptions (2026 Benchmarks) ---
+        p_max_mw = battery_params.get('max_power', 10)
+        cap_mwh = battery_params.get('capacity', 20)
+        
+        capex_per_mwh = 135000       # £135k per MWh for LFP
+        opex_per_mw_year = 6500      # £6.5k per MW per year (Fixed)
+        discount_rate = 0.09         # 9% WACC
+        
+        initial_investment = cap_mwh * capex_per_mwh
+        
+        # --- 2. Aggregate Data to Annual ---
+        # Ensure Date is datetime
+        summary_df['Date'] = pd.to_datetime(summary_df['Date'])
+        yearly = summary_df.resample('YE', on='Date').agg({
+            'Total_Profit': 'sum',
+            'SOH': 'min'
+        })
+        
+        # Calculate Net Cash Flow (Profit - Fixed OPEX)
+        yearly['Net_Cash_Flow'] = yearly['Total_Profit'] - (p_max_mw * opex_per_mw_year)
+        
+        # Create the Cash Flow Series (Year 0 is CAPEX)
+        cash_flows = [-initial_investment] + yearly['Net_Cash_Flow'].tolist()
+        cum_cash_flow = np.cumsum(cash_flows)
+        years = np.arange(0, len(cash_flows))
+
+        # --- 3. Calculate Metrics ---
+        npv_val = npf.npv(discount_rate, cash_flows)
+        irr_val = npf.irr(cash_flows)
+        
+        # --- 4. Plotting the J-Curve ---
+        fig, ax1 = plt.subplots(figsize=(12, 7))
+
+        # Bar chart for annual net cash flow
+        bars = ax1.bar(years[1:], yearly['Net_Cash_Flow'], color='skyblue', alpha=0.7, label='Annual Net Cash Flow')
+        
+        # Line chart for cumulative cash flow
+        ax1.plot(years, cum_cash_flow, color='navy', marker='o', linewidth=2, label='Cumulative Cash Flow')
+        
+        # Formatting
+        ax1.axhline(0, color='black', linewidth=1) # Breakeven line
+        ax1.set_xlabel('Project Year')
+        ax1.set_ylabel('Currency (£)')
+        ax1.set_title(f'BESS Financial Appraisal: NPV £{npv_val:,.0f} | IRR {irr_val*100:.2f}%', fontsize=14)
+        
+        # Annotate Payback Period
+        payback_year = next((i for i, v in enumerate(cum_cash_flow) if v > 0), None)
+        if payback_year:
+            ax1.annotate(f'Payback: Year {payback_year}', 
+                        xy=(payback_year, cum_cash_flow[payback_year]),
+                        xytext=(payback_year-1, cum_cash_flow[payback_year]+500000),
+                        arrowprops=dict(facecolor='black', shrink=0.05))
+
+        ax1.legend(loc='upper left')
+        ax1.grid(True, linestyle=':', alpha=0.6)
+        
+        plt.tight_layout()
+        plt.show()
+
+    @staticmethod
+    def run_financial_analysis(summary_df, battery_params):
+        """Post-processing static method for NPV/IRR."""
+        import numpy_financial as npf
+        
+        # Financial Benchmarks
+        p_max = battery_params.get('max_power', 10)
+        capacity = battery_params.get('capacity', 20)
+        capex_total = capacity * 135000 
+        opex_annual = p_max * 6500
+        discount_rate = 0.09
+        
+        summary_df['Date'] = pd.to_datetime(summary_df['Date'])
+        yearly = summary_df.resample('YE', on='Date').agg({'Total_Profit': 'sum'})
+        
+        # Cash Flow: [Year 0: -CAPEX, Year 1: (Profit - OPEX), ...]
+        annual_net_flows = (yearly['Total_Profit'] - opex_annual).tolist()
+        cash_flows = [-capex_total] + annual_net_flows
+        
+        return {
+            "npv": npf.npv(discount_rate, cash_flows),
+            "irr": npf.irr(cash_flows),
+            "cum_cf": np.cumsum(cash_flows),
+            "years": np.arange(len(cash_flows))
+        }
 
 
 
