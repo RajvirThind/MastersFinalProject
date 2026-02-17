@@ -63,7 +63,7 @@ class BESS_Optimiser:
         """Setting up linear programming decision variables with Integer and Binary types."""
         charge_discharge_indices = [(t, m) for t in self.time_steps for m in self.markets]
         
-        # 1. Existing Power and Status Variables
+        #Power and Status Variables
         self.charge = pulp.LpVariable.dicts("charge", charge_discharge_indices, 
                                             lowBound=0, upBound=self.p_max, cat='Continuous') 
         self.discharge = pulp.LpVariable.dicts("discharge", charge_discharge_indices, 
@@ -71,19 +71,19 @@ class BESS_Optimiser:
         self.is_charging = pulp.LpVariable.dicts("is_charging", self.time_steps, cat='Binary')
         self.is_discharging = pulp.LpVariable.dicts("is_discharging", self.time_steps, cat='Binary')
         
-        # 2. Existing SOC and Throughput Variables
+        #SOC and Throughput Variables
         self.soc = pulp.LpVariable.dicts("soc", self.time_steps, 
                                         lowBound=self.soc_min, upBound=self.soc_max, cat='Continuous')
         self.discharge_energy = pulp.LpVariable.dicts("discharge_energy", self.time_steps, lowBound=0)
         self.daily_cycles = pulp.LpVariable("daily_cycles", lowBound=0)
         self.high_intensity_discharge = pulp.LpVariable.dicts("high_intensity_discharge", self.time_steps, lowBound=0)
 
-        # 3. NEW: Ancillary Logic Variables (Integer MW and Min Capacity)
+        #Ancillary Logic Variables (Integer MW and Min Capacity)
         anc_indices = [(t, m) for t in self.time_steps for m in (self.ancillary_low + self.ancillary_high)]
         self.anc_mw = pulp.LpVariable.dicts("anc_mw", anc_indices, lowBound=0, upBound=self.p_max, cat='Integer')
         self.anc_active = pulp.LpVariable.dicts("anc_active", anc_indices, cat='Binary')
 
-        # 4. NEW: Piecewise Linear SOC (Safe vs. Stress zones)
+        # Piecewise Linear SOC (Safe vs. Stress zones)
         self.soc_safe = pulp.LpVariable.dicts("soc_safe", self.time_steps, lowBound=0)
         self.soc_stress = pulp.LpVariable.dicts("soc_stress", self.time_steps, lowBound=0)        
 
@@ -94,7 +94,7 @@ class BESS_Optimiser:
         2. High C-Rate (Intensity) wear and tear
         3. Balancing Mechanism (BM) skip-rate risk weighting
         """
-        # --- 1. Market Revenue Streams ---
+        #Market Revenue Streams
         
         # Arbitrage (DayAhead, Intraday, Imbalance)
         # Excludes BM here to apply specific risk weighting below
@@ -118,9 +118,9 @@ class BESS_Optimiser:
             for t in self.time_steps for m in (self.ancillary_low + self.ancillary_high)
         )
 
-        # --- 2. Cost & Penalty Terms (Internalizing Degradation) ---
+        # Cost & Penalty Terms 
         
-        # A. Standard Throughput Cost (£/MWh)
+        # Standard Throughput Cost (£/MWh)
         # Reflects the 'Levelized Cost of Storage' (LCOS) wear-and-tear
         # In 2026, standard LFP wear is roughly £5.00 - £8.00 per MWh discharged
         standard_deg_cost = 6.50   
@@ -128,7 +128,7 @@ class BESS_Optimiser:
             self.discharge_energy[t] * standard_deg_cost for t in self.time_steps
         )
 
-        # B. Piecewise Linear Stress Penalty
+        # piecewise Linear Stress Penalty
         # Penalizes the battery for sitting in or moving through high/low SOC zones (<20% or >80%)
         # This mimics accelerated chemical degradation at SOC extremes.
         stress_penalty_rate = 12.00 # Extra £ per MWh equivalent sitting in stress zone
@@ -136,7 +136,7 @@ class BESS_Optimiser:
             self.soc_stress[t] * stress_penalty_rate * self.dt for t in self.time_steps
         )
 
-        # C. C-Rate / High Intensity Penalty
+        # C-Rate / High Intensity Penalty
         # Extra wear-and-tear for discharging above 0.5C (e.g., fast 1C bursts)
         high_c_penalty_rate = 15.00 # £ per MWh for high-power usage
         intensity_cost = pulp.lpSum(
@@ -144,7 +144,7 @@ class BESS_Optimiser:
             for t in self.time_steps
         )
 
-        # --- 3. Final Objective Function ---
+        # Final Objective Function
         # Maximize: (Total Revenue) - (Total Internalized Costs)
         total_revenue = arbitrage_profit + bm_profit + ancillary_revenue
         total_costs = deg_cost + stress_cost + intensity_cost
@@ -171,7 +171,7 @@ class BESS_Optimiser:
             'DRLow': 1.0, 'DRHigh': 1.0        # 60 mins for DR
         }
 
-        # === 1. EFA Block Constraints (4-hour locks) ===
+        # EFA Block Constraints (4-hour locks)
         steps_per_block = int(4 / self.dt)
         for block_start in range(0, len(self.time_steps), steps_per_block):
             block_indices = self.time_steps[block_start : block_start + steps_per_block]

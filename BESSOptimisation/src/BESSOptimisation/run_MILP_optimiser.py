@@ -97,18 +97,18 @@ def simulate_bess_operation():
                 'SOH': current_soh, 'Throughput_MWh': 0
             })
 
-    # --- Post-Simulation Processing ---
+    
     summary_df = pd.DataFrame(daily_summaries)
     
     if not summary_df.empty:
-        # 1. Long Term Appraisal (SOH and Operational Profit Breakdown)
+        # Long Term Appraisal (SOH and Operational Profit Breakdown)
         BESS_Optimiser.plot_long_term_appraisal(summary_df) 
 
-        # 2. Financial Appraisal (NPV/IRR J-Curve)
+        # Financial Appraisal (NPV/IRR J-Curve)
         fin_results = BESS_Optimiser.run_financial_analysis(summary_df, battery_params)
         plot_finance(fin_results)
 
-    # 3. Operational Preview (Last full day of dispatch)
+    # Operational Preview (Last full day of dispatch)
     if dispatch_data_list:
         last_day_results = dispatch_data_list[-1]
         opt.plot_operation(last_day_results)
