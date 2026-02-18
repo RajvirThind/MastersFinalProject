@@ -1,6 +1,48 @@
 import matplotlib.pyplot as plt
 import pandas as pd
 import numpy as np
+import numpy_financial as npf # Industry standard for NPV/IRR
+
+def calculate_investment_metrics(summary_df, battery_params):
+    # 1. Setup Parameters
+    p_max_mw = battery_params.get('max_power', 10)
+    cap_mwh = battery_params.get('capacity', 20)
+    capex_per_mwh = 135000
+    opex_per_mw_year = 6000
+    discount_rate = 0.09
+    
+    # 2. Initial Investment (Year 0)
+    initial_investment = cap_mwh * capex_per_mwh
+    
+    # 3. Aggregate Daily Data to Annual
+    yearly_data = summary_df.resample('YE', on='Date').agg({
+        'Total_Profit': 'sum',
+        'SOH': 'mean'
+    })
+    
+    # 4. Cash Flow Calculation
+    # We subtract Fixed OPEX from the Operational Profit
+    yearly_data['Net_Cash_Flow'] = yearly_data['Total_Profit'] - (p_max_mw * opex_per_mw_year)
+    
+    # List of cash flows starting with negative CAPEX at Year 0
+    cash_flows = [-initial_investment] + yearly_data['Net_Cash_Flow'].tolist()
+    
+    # 5. Financial Metrics
+    npv = npf.npv(discount_rate, cash_flows)
+    irr = npf.irr(cash_flows)
+    
+    # Calculate Payback Period
+    cum_cf = np.cumsum(cash_flows)
+    payback_year = next((i for i, v in enumerate(cum_cf) if v > 0), None)
+    
+    return {
+        "npv": npv,
+        "irr": irr,
+        "payback_year": payback_year,
+        "cum_cash_flow": cum_cf,
+        "yearly_cf": cash_flows
+    }
+
 
 
 
