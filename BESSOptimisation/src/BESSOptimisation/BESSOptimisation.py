@@ -6,7 +6,7 @@ import matplotlib.pyplot as plt
 import numpy_financial as npf
 
 class BESS_Optimiser:
-    """Mixed Ineteger Linear Programming (MILP) Optimiser for BESS Operation across multiple markets."""
+    """Mixed Integer Linear Programming (MILP) Optimiser for BESS Operation across multiple markets."""
     def __init__(self, prices_df, battery_params, current_soh = 1.0, last_soc = None):
         """initialising the model parameters and input data"""
 
