@@ -203,3 +203,11 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+
+# -----------------------------
+# Custom Project Exclusions
+# -----------------------------
+
+# Ignore the data directory and all its contents
+data/
