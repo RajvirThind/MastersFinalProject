@@ -2,6 +2,44 @@ import pandas as pd
 import numpy as np 
 from BESSOptimisation import BESS_Optimiser
 from utils import *
+import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
+
+
+def plot_weekly_soc(dispatch_data_list, week_start_day=0):
+    """
+    Plots the SOC for a 7-day period to show weekly cycling behavior.
+    week_start_day determines which day in the list to start the 7-day slice.
+    """
+    if len(dispatch_data_list) < week_start_day + 7:
+        print("Not enough data to plot a full 7-day week from the specified start day.")
+        return
+
+    # Concatenate 7 consecutive days of dispatch data
+    week_data = pd.concat(dispatch_data_list[week_start_day : week_start_day + 7])
+
+    fig, ax = plt.subplots(figsize=(14, 5))
+    
+    # Plot the SOC line
+    ax.plot(week_data.index, week_data['SOC'], color='tab:green', linewidth=2, label='State of Charge (MWh)')
+    
+    # Formatting
+    ax.set_title("Typical Weekly Battery State of Charge (SOC)", fontsize=14, fontweight='bold')
+    ax.set_ylabel("SOC (MWh)", fontweight='bold')
+    ax.set_ylim(bottom=0) # Keeps the y-axis grounded at 0
+    
+    # Format the X-axis to show days clearly
+    days_locator = mdates.DayLocator()
+    days_formatter = mdates.DateFormatter('%a %d %b') # e.g., "Mon 01 Jan"
+    ax.xaxis.set_major_locator(days_locator)
+    ax.xaxis.set_major_formatter(days_formatter)
+    
+    ax.grid(True, which='both', linestyle='--', alpha=0.5)
+    ax.legend(loc='upper right')
+    
+    plt.xticks(rotation=0)
+    plt.tight_layout()
+    plt.show()
 
 
 def plot_finance(fin_data):
@@ -112,6 +150,9 @@ def simulate_bess_operation():
     if dispatch_data_list:
         last_day_results = dispatch_data_list[-1]
         opt.plot_operation(last_day_results)
+
+        print("Generating weekly SOC chart...")
+        plot_weekly_soc(dispatch_data_list, week_start_day=0)
 
     print(f"Final SOH: {current_soh:.2%}")
     print("Simulation and Financial Analysis complete.")

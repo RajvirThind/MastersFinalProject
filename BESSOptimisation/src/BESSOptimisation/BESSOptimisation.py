@@ -210,12 +210,19 @@ class BESS_Optimiser:
             self.model += self.soc[t] == self.soc_safe[t] + self.soc_stress[t], f"SOC_Composition_{t}"
             self.model += self.soc_safe[t] <= (safe_upper_threshold - safe_lower_threshold), f"Safe_SOC_Limit_{t}"
 
-            # --- Energy Balance (Utilization-Adjusted) ---
+            # --- Energy Balance (Corrected RTE Logic) ---
+            # Calculate the square root of RTE to split losses 50/50
+            rte_sqrt = self.rte**0.5  
+
             t_loc = self.prices_df.index.get_loc(t)
             soc_prev = self.soc_initial if t_loc == 0 else self.soc[self.time_steps[t_loc - 1]]
-            
-            energy_in = (step_arb_charge + (alpha * step_anc_high)) * self.rte * self.dt
-            energy_out = (step_arb_discharge + (alpha * step_anc_low)) / self.rte * self.dt
+
+            # Apply losses: 
+            # When charging, only sqrt(RTE) of the power actually enters the battery.
+            # When discharging, you must pull 1/sqrt(RTE) from the battery to get 1 unit of power out.
+            energy_in = (step_arb_charge + (alpha * step_anc_high)) * rte_sqrt * self.dt
+            energy_out = (step_arb_discharge + (alpha * step_anc_low)) / rte_sqrt * self.dt
+
             self.model += self.soc[t] == soc_prev + energy_in - energy_out, f"Energy_Balance_{t}"
 
             # --- Advanced Delivery Duration (Safety Buffer) ---
