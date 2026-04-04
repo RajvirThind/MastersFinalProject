@@ -2,6 +2,29 @@ import matplotlib.pyplot as plt
 import pandas as pd
 import numpy as np
 import numpy_financial as npf # Industry standard for NPV/IRR
+from stable_baselines3.common.callbacks import BaseCallback  # Callback import
+import time
+
+# --- Custom Callback for Timing ---
+class TimeTrackingCallback(BaseCallback):
+    """
+    Custom callback for reporting the total training time.
+    """
+    def __init__(self, verbose=0):
+        super(TimeTrackingCallback, self).__init__(verbose)
+        self.start_time = None
+
+    def _on_training_start(self) -> None:
+        self.start_time = time.time()
+        print("--- Training Started ---")
+
+    def _on_training_end(self) -> None:
+        total_duration = time.time() - self.start_time
+        print(f"--- Training Finished ---")
+        print(f"Total Training Time: {total_duration:.2f} seconds ({total_duration/60:.2f} minutes)")
+
+    def _on_step(self) -> bool:
+        return True
 
 def calculate_investment_metrics(summary_df, battery_params):
     # 1. Setup Parameters
@@ -161,3 +184,4 @@ def generate_hybrid_skip_matrix(df, markets, p_site_fault=0.005, p_ancillary_fau
                 skip_df.loc[current_indices, 'BM'] = 1
                 
     return skip_df
+

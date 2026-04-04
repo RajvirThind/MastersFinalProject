@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 from torch.utils.data import DataLoader, TensorDataset
 from stable_baselines3 import SAC
-from DayAheadMILP_optimiser import BESS_Optimiser
+from BESSOptimisation.milp.DayAheadMILP_optimiser import BESS_Optimiser
 from BESSOptimisation.src.BESSOptimisation.test_models.dayahead_agent_v3 import BESSEnv
 
 

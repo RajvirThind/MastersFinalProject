@@ -6,7 +6,7 @@ from stable_baselines3.common.callbacks import EvalCallback
 from stable_baselines3.common.monitor import Monitor
 
 # Import your custom environment
-from dayahead_agent_v2 import BESS_RLEnv
+from BESSOptimisation.src.BESSOptimisation.environments.dayahead_bess_env import BESS_RLEnv
 
 # --- CONFIGURATION ---
 DATA_PATH = 'data/GBCentralAllComplete_Prices.csv'

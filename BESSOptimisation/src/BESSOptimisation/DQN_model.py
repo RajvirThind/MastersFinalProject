@@ -120,7 +120,7 @@ class BESSEnv(gym.Env):
 MODEL_NAME = "bess_dqn_original_competitive"
 VEC_NORM_PATH = "vec_normalize_dqn_original.pkl"
 TRAIN_STEPS = 500000 
-DATA_PATH = 'data/GBCentralAllComplete_Prices.csv'
+DATA_PATH = '../../data/GBCentralAllComplete_Prices.csv'
 
 battery_params = {
     'time_interval': 0.5, 

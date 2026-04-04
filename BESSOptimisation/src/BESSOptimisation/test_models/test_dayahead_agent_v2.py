@@ -5,7 +5,7 @@ import matplotlib.dates as mdates
 from stable_baselines3 import PPO
 
 # Import your custom environment
-from dayahead_agent_v2 import BESS_RLEnv
+from BESSOptimisation.src.BESSOptimisation.environments.dayahead_bess_env import BESS_RLEnv
 
 # --- CONFIGURATION ---
 DATA_PATH = 'data/GBCentralAllComplete_Prices.csv'

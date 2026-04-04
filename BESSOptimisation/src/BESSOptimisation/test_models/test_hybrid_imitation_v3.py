@@ -18,7 +18,7 @@ import matplotlib.dates as mdates
 from stable_baselines3 import SAC
 
 # Python will now successfully find this in the parent folder!
-from DayAheadMILP_optimiser import BESS_Optimiser 
+from BESSOptimisation.milp.DayAheadMILP_optimiser import BESS_Optimiser 
 from BESSOptimisation.src.BESSOptimisation.test_models.dayahead_agent_v3 import BESSEnv # Make sure this name matches your actual agent file name
 
 def run_hybrid_test(df, battery_params, model_path, num_days=7):
