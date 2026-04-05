@@ -1,0 +1,171 @@
+import os
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+from stable_baselines3 import PPO
+from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
+
+# Import the MILP Optimiser
+from BESSOptimisation import BESS_Optimiser 
+
+# Import your new Multi-Market RL Environment
+from multi_market_agent import MultiMarketBESSEnv 
+
+def run_multimarket_comparison(test_df, battery_params, rl_model_path, vec_norm_path):
+    """Runs MILP and PPO on the 8-market data and plots the co-optimization results."""
+    
+    # --- 1. Running MILP Optimisation ---
+    print("Running Multi-Market MILP Optimisation (This may take a minute)...")
+    milp_opt = BESS_Optimiser(test_df, battery_params)
+    milp_opt.define_variables()
+    milp_opt.set_objective()
+    milp_opt.set_constraints()
+    milp_results = milp_opt.solve_and_collect()
+    
+    if milp_results is None or milp_results.empty:
+        print("MILP failed to find a solution or returned empty.")
+        return
+
+    # --- 2. Running RL Agent Inference ---
+    print("Running Multi-Market PPO Inference...")
+    
+    if not os.path.exists(rl_model_path):
+        print(f"RL Model not found at {rl_model_path}")
+        return
+    if not os.path.exists(vec_norm_path):
+        print(f"Normalization file not found at {vec_norm_path}")
+        return
+
+    # Wrap the environment 
+    eval_env = DummyVecEnv([lambda: MultiMarketBESSEnv(test_df, battery_params)])
+    eval_env = VecNormalize.load(vec_norm_path, eval_env)
+    eval_env.training = False 
+    eval_env.norm_reward = False 
+    
+    model = PPO.load(rl_model_path, env=eval_env)
+    
+    obs = eval_env.reset()
+    
+    # Stop early to avoid the VecEnv auto-reset bug
+    for _ in range(len(test_df) - 2):
+        action, _ = model.predict(obs, deterministic=True)
+        obs, reward, done, info = eval_env.step(action)
+        if done[0]: break
+    
+    # Extract RL history
+    rl_results = pd.DataFrame(eval_env.envs[0].history)
+    rl_results.index = test_df.index[:len(rl_results)]
+
+    # --- 3. Data Processing for Visualization ---
+    print(f"\n[DIAGNOSTIC] MILP returned columns: {milp_results.columns.tolist()}")
+
+    # Smart Fallback: Check if the MILP returned multi-market columns or the old single-market column
+    if 'Power_DayAhead' in milp_results.columns:
+        milp_arb_power = (milp_results.get('Power_DayAhead', 0) + 
+                          milp_results.get('Power_Intraday', 0) + 
+                          milp_results.get('Power_BM', 0) + 
+                          milp_results.get('Power_Imbalance', 0))
+    elif 'Power' in milp_results.columns:
+        print("\nWARNING: Detected old MILP output format ('Power').")
+        milp_arb_power = milp_results['Power']
+    else:
+        print("CRITICAL: No power columns found in MILP output. Graphing will fail.")
+        return
+        
+    # Smart Fallback for Profit Column
+    if 'Total Hourly Profit' in milp_results.columns:
+        milp_cum_profit = milp_results['Total Hourly Profit'].cumsum()
+    elif 'Hourly_Profit' in milp_results.columns:
+        milp_cum_profit = milp_results['Hourly_Profit'].cumsum()
+    else:
+        milp_cum_profit = milp_results.iloc[:, -1].cumsum()
+
+    rl_cum_profit = rl_results['Net_Profit'].cumsum()
+
+    # --- 4. Consolidated Plotting ---
+    # Increased figure height to accommodate the 4th subplot
+    fig, (ax1, ax2, ax3, ax4) = plt.subplots(4, 1, figsize=(15, 18), sharex=True)
+    
+    # Plot 1: SOC Comparison
+    ax1.plot(milp_results.index, milp_results['SOC'], label='MILP (Optimal)', color='black', linewidth=2)
+    ax1.plot(rl_results.index, rl_results['SOC'], label='PPO Agent', color='tab:blue', linestyle='--')
+    ax1.axhline(battery_params['soc_min_factor'] * battery_params['capacity'], color='red', linestyle=':', alpha=0.5)
+    ax1.axhline(battery_params['soc_max_factor'] * battery_params['capacity'], color='green', linestyle=':', alpha=0.5)
+    ax1.set_ylabel('SOC (MWh)')
+    ax1.set_title('Co-Optimization: State of Charge (SOC) Management')
+    ax1.legend(loc='upper right')
+    ax1.grid(True, alpha=0.3)
+
+    # Plot 2: Arbitrage Power Comparison
+    ax2.step(milp_results.index, milp_arb_power, where='post', label='MILP Net Arbitrage (MW)', color='black', alpha=0.7)
+    ax2.step(rl_results.index, rl_results['Arb_Power_Used'], where='post', label='RL Net Arbitrage (MW)', color='tab:blue', alpha=0.6)
+    ax2.set_ylabel('Power (MW)')
+    ax2.set_title('Active Energy Trading (Arbitrage Volume)')
+    ax2.legend(loc='upper left')
+    ax2.grid(True, alpha=0.3)
+
+    # Plot 3: Cumulative Multi-Market Profit
+    ax3.plot(milp_results.index, milp_cum_profit, label='MILP Total Profit', color='black', linewidth=2)
+    ax3.plot(rl_results.index, rl_cum_profit, label='PPO Total Profit', color='tab:orange', linestyle='--')
+    ax3.set_ylabel('Cumulative Net Profit (£)')
+    ax3.set_title('Total Revenue Stack Capture (All 8 Markets)')
+    ax3.legend(loc='upper left')
+    ax3.grid(True, alpha=0.3)
+
+    # Plot 4: RL Market Participation (Stacked Bar Chart)
+    rl_power_cols = ['Power_DayAhead', 'Power_Intraday', 'Power_BM', 'Power_Imbalance', 
+                     'Power_DCDMLow', 'Power_DRLow', 'Power_DCDMHigh', 'Power_DRHigh']
+    
+    # Verify the new columns exist before attempting to plot them
+    if all(col in rl_results.columns for col in rl_power_cols):
+        for col in rl_power_cols:
+            # Bar width scaled to half-hourly intervals
+            ax4.bar(rl_results.index, rl_results[col], width=battery_params['time_interval']/24, 
+                    label=col.replace('Power_', ''), alpha=0.8)
+        
+        ax4.set_ylabel('Power Allocation (MW)')
+        ax4.set_title('RL Agent Market Allocation Strategy (Stacked Stack)')
+        ax4.axhline(0, color='black', linewidth=0.8)
+        # Move the legend outside the plot area so it doesn't cover the data
+        ax4.legend(loc='center left', bbox_to_anchor=(1, 0.5), fontsize='small')
+        ax4.grid(True, linestyle=':', alpha=0.6)
+    else:
+        ax4.text(0.5, 0.5, 'Error: Individual Power columns missing from RL History.\nPlease update history.append() in multi_market_agent.py', 
+                 horizontalalignment='center', verticalalignment='center', transform=ax4.transAxes, color='red')
+
+    plt.tight_layout()
+    plt.show()
+
+    # --- 5. Numerical Summary ---
+    total_milp = milp_cum_profit.iloc[-1]
+    total_rl = rl_cum_profit.iloc[-1]
+    efficiency = (total_rl / total_milp) * 100
+
+    print("\n" + "="*45)
+    print(f"MULTI-MARKET COMPARISON SUMMARY")
+    print("="*45)
+    print(f"MILP Total Profit:  £{total_milp:,.2f}")
+    print(f"PPO Total Profit:   £{total_rl:,.2f}")
+    print(f"Agent Efficiency:   {efficiency:.2f}% of Theoretical Optimal")
+    print("="*45)
+
+if __name__ == "__main__":
+    
+    full_df = pd.read_csv('data/GBCentralAllComplete_Prices.csv', index_col='Date', parse_dates=True)
+    
+    required_cols = ['DayAhead', 'Intraday', 'BM', 'Imbalance', 'DCDMLow', 'DRLow', 'DCDMHigh', 'DRHigh']
+    full_df = full_df[required_cols]
+    
+    test_window = full_df.iloc[11640 : 11640 + (48 * 7)] 
+    
+    params = {
+        'time_interval': 0.5, 
+        'max_power': 10, 
+        'capacity': 20, 
+        'rte': 0.9,
+        'soc_min_factor': 0.1, 
+        'soc_max_factor': 0.9, 
+        'utilisation_factor': 0.02
+    }
+    
+    run_multimarket_comparison(test_window, params, "bess_multimarket_ppo.zip", "vec_normalize_multimarket.pkl")
