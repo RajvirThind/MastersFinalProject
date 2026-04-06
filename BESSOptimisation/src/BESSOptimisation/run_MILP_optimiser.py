@@ -62,7 +62,7 @@ def plot_finance(fin_data):
 def simulate_bess_operation():
     print("Loading price data...")
     full_price_df = pd.read_csv('data/GBCentralAllComplete_Prices.csv', index_col='Date', parse_dates=True)
-    full_price_df = full_price_df.head(2880) 
+    full_price_df = full_price_df.head(20000) 
 
     battery_params = {
         'time_interval': 0.5, 
