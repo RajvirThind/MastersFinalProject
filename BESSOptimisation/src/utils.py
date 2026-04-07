@@ -1,0 +1,248 @@
+import matplotlib.pyplot as plt
+import pandas as pd
+import numpy as np
+import numpy_financial as npf # Industry standard for NPV/IRR
+import time
+from stable_baselines3.common.callbacks import BaseCallback
+from matplotlib import dates as mdates
+
+
+class TimeTrackingCallback(BaseCallback):
+    """
+    Custom callback for reporting the total training time.
+    """
+    def __init__(self, verbose=0):
+        super(TimeTrackingCallback, self).__init__(verbose)
+        self.start_time = None
+
+    def _on_training_start(self) -> None:
+        self.start_time = time.time()
+        print("--- Training Started ---")
+
+    def _on_training_end(self) -> None:
+        total_duration = time.time() - self.start_time
+        print(f"--- Training Finished ---")
+        print(f"Total Training Time: {total_duration:.2f} seconds ({total_duration/60:.2f} minutes)")
+
+    def _on_step(self) -> bool:
+        return True
+    
+
+def plot_revenue_stacking(dispatch_data_list, week_start_day=0):
+    """
+    Plots a stacked area chart of revenue sources over a 7-day period.
+    """
+    if len(dispatch_data_list) < week_start_day + 7:
+        print("Not enough data for a 7-day revenue stack.")
+        return
+
+    # 1. Concatenate 7 days of data
+    week_data = pd.concat(dispatch_data_list[week_start_day : week_start_day + 7])
+
+    # 2. Group the markets for cleaner visualization
+    # We group them into families to avoid a messy graph with 8+ tiny lines
+    stack_df = pd.DataFrame(index=week_data.index)
+    
+    # Wholesale Arbitrage Family
+    arb_cols = ['Profit_DayAhead', 'Profit_Intraday', 'Profit_BM', 'Profit_Imbalance']
+    stack_df['Arbitrage'] = week_data[[c for c in arb_cols if c in week_data.columns]].sum(axis=1)
+    
+    # Ancillary Low (Discharge-based services)
+    low_cols = ['Profit_DCDMLow', 'Profit_DRLow']
+    stack_df['Ancillary_Low'] = week_data[[c for c in low_cols if c in week_data.columns]].sum(axis=1)
+    
+    # Ancillary High (Charge-based services)
+    high_cols = ['Profit_DCDMHigh', 'Profit_DRHigh']
+    stack_df['Ancillary_High'] = week_data[[c for c in high_cols if c in week_data.columns]].sum(axis=1)
+
+    # 3. Plotting
+    fig, ax = plt.subplots(figsize=(14, 6))
+    
+    # We use stackplot to show the 'composition' of revenue
+    ax.stackplot(stack_df.index, 
+                 stack_df['Arbitrage'], 
+                 stack_df['Ancillary_Low'], 
+                 stack_df['Ancillary_High'],
+                 labels=['Wholesale Arbitrage', 'Ancillary (Low/Freq)', 'Ancillary (High/Freq)'],
+                 colors=['#1f77b4', '#d62728', '#2ca02c'], 
+                 alpha=0.8)
+
+    # Formatting
+    ax.set_title("MILP Value Stacking: Weekly Revenue Composition", fontsize=14, fontweight='bold')
+    ax.set_ylabel("Half-Hourly Profit (£)", fontweight='bold')
+    ax.axhline(0, color='black', linewidth=0.8)
+    
+    days_locator = mdates.DayLocator()
+    ax.xaxis.set_major_locator(days_locator)
+    ax.xaxis.set_major_formatter(mdates.DateFormatter('%a %d %b'))
+    
+    ax.legend(loc='upper left', frameon=True)
+    ax.grid(True, axis='y', linestyle='--', alpha=0.3)
+    
+    plt.tight_layout()
+    plt.savefig('milp_outputs/revenue_stacking_analysis.png', dpi=300)
+    print("Saved: revenue_stacking_analysis.png")
+    plt.show()
+
+
+
+def calculate_investment_metrics(summary_df, battery_params):
+    """
+    Calculate key investment metrics for the BESS project.
+    """
+    #Setup Parameters
+    p_max_mw = battery_params.get('max_power', 10)
+    cap_mwh = battery_params.get('capacity', 20)
+    capex_per_mwh = 135000
+    opex_per_mw_year = 6000
+    discount_rate = 0.09
+    
+    #Initial Investment (Year 0)
+    initial_investment = cap_mwh * capex_per_mwh
+    
+    # Aggregate Daily Data to Annual
+    yearly_data = summary_df.resample('YE', on='Date').agg({
+        'Total_Profit': 'sum',
+        'SOH': 'mean'
+    })
+    
+    # Cash Flow Calculation
+    # We subtract Fixed OPEX from the Operational Profit
+    yearly_data['Net_Cash_Flow'] = yearly_data['Total_Profit'] - (p_max_mw * opex_per_mw_year)
+    
+    # List of cash flows starting with negative CAPEX at Year 0
+    cash_flows = [-initial_investment] + yearly_data['Net_Cash_Flow'].tolist()
+
+    # Financial Metrics
+    npv = npf.npv(discount_rate, cash_flows)
+    irr = npf.irr(cash_flows)
+    
+    # Calculate Payback Period
+    cum_cf = np.cumsum(cash_flows)
+    payback_year = next((i for i, v in enumerate(cum_cf) if v > 0), None)
+    
+    return {
+        "npv": npv,
+        "irr": irr,
+        "payback_year": payback_year,
+        "cum_cash_flow": cum_cf,
+        "yearly_cf": cash_flows
+    }
+
+
+
+
+def plot_long_term_appraisal(summary_df):
+    """Generates a dynamic view of revenue streams and battery health based on actual data range."""
+    if summary_df is None or summary_df.empty:
+        print("Summary DataFrame is empty. Cannot plot.")
+        return
+
+    summary_df['Date'] = pd.to_datetime(summary_df['Date'])
+    
+    # Check if we have enough data to resample; if not, use raw daily data
+    # If the simulation is short (< 60 days), we use daily steps. 
+    # If long, we resample to weekly to keep the bars readable.
+    if len(summary_df) > 60:
+        plot_df = summary_df.resample('W', on='Date').sum()
+        plot_df['SOH'] = summary_df.resample('W', on='Date').mean()['SOH']
+    else:
+        plot_df = summary_df.set_index('Date')
+
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 10), sharex=True)
+
+    # Stacked Revenue Streams
+    revenue_cols = ['Arbitrage_Profit', 'Ancillary_Low_Profit', 'Ancillary_High_Profit']
+    
+    # Filter to only existing columns to avoid errors
+    existing_cols = [c for c in revenue_cols if c in plot_df.columns]
+    
+    # Plotting stacked bars
+    plot_df[existing_cols].plot(kind='bar', stacked=True, ax=ax1, width=0.8, alpha=0.8)
+    
+    ax1.set_ylabel('Profit (£)')
+    ax1.set_title('BESS Revenue Breakdown (Actual Generated Dates)', fontsize=14)
+    ax1.legend(loc='upper left', fontsize='small')
+    ax1.grid(True, linestyle=':', alpha=0.6)
+
+    # SOH vs Throughput
+    ax2_twin = ax2.twinx()
+    
+    # Plot SOH (State of Health) as a line
+    ax2.plot(plot_df.index.astype(str), plot_df['SOH'] * 100, color='red', marker='o', label='SOH %', linewidth=2)
+    ax2.set_ylabel('State of Health (%)', color='red')
+    ax2.tick_params(axis='y', labelcolor='red')
+    
+    # Plot Throughput on the twin axis
+    ax2_twin.bar(plot_df.index.astype(str), plot_df['Throughput_MWh'], color='gray', alpha=0.3, label='Throughput (MWh)')
+    ax2_twin.set_ylabel('Energy Throughput (MWh)', color='gray')
+
+    ax2.set_title('Degradation and Physical Utilization')
+    
+    # Adjust X-axis labels to prevent crowding
+    plt.xticks(rotation=45)
+    
+    # Reduce the number of x-ticks displayed if there are too many
+    n = max(1, len(plot_df) // 10)
+    ax2.set_xticks(ax2.get_xticks()[::n])
+
+    plt.tight_layout()
+    plt.show()
+
+def plot_soc_preview(dispatch_df):
+    """Plots the State of Charge (SOC) preview from the dispatch DataFrame."""
+    if dispatch_df is None or dispatch_df.empty:
+        print("Dispatch DataFrame is empty. Cannot plot SOC preview.")
+        return
+    first_week_preview_df = dispatch_df.head(336)  # First Week
+    last_week_preview_df = dispatch_df.tail(336)  # Last Week
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10))
+
+    # Plotting first week preview
+    ax1.plot(first_week_preview_df.index, first_week_preview_df['SOC'], label='SOC', color='blue', marker='o')
+    ax1.set_title('State of Charge (SOC) - First Week')
+    ax1.set_ylabel('SOC (MWh)')
+    ax1.grid(True)
+    ax1.legend()
+
+    # Plotting last week preview
+    ax2.plot(last_week_preview_df.index, last_week_preview_df['SOC'], label='SOC', color='blue', marker='o')
+    ax2.set_title('State of Charge (SOC) - Last Week')
+    ax2.set_ylabel('SOC (MWh)')
+    ax2.grid(True)
+    ax2.legend()
+
+    plt.tight_layout()
+    plt.show()
+
+def generate_hybrid_skip_matrix(df, markets, p_site_fault=0.005, p_ancillary_fault=0.02, p_bm_skip=0.80, block_size=8):
+    """
+    Implements a hybrid skip logic with specific BM constraints:
+    1. Site-wide faults: Battery offline for ALL markets.
+    2. Ancillary-specific faults: Battery skips only ancillary markets.
+    3. BM Skip Rate: 80% chance of being bypassed by the ESO Control Room.
+    """
+    skip_df = pd.DataFrame(0, index=df.index, columns=markets)
+    ancillary_markets = ['DCDMLow', 'DRLow', 'DCDMHigh', 'DRHigh']
+    
+    for start in range(0, len(df), block_size):
+        end = min(start + block_size, len(df))
+        current_indices = df.index[start:end]
+
+        # 1. Site-wide outage (All markets)
+        if np.random.rand() < p_site_fault:
+            skip_df.loc[current_indices, :] = 1
+            continue  
+            
+        # 2. Category-wide ancillary outage (DCDM, DR)
+        if np.random.rand() < p_ancillary_fault:
+            cols_to_skip = [m for m in markets if m in ancillary_markets]
+            skip_df.loc[current_indices, cols_to_skip] = 1
+        
+        # 3. Balancing Mechanism (BM) specific skip rate
+        # This applies an 80% skip rate specifically to the BM market
+        if 'BM' in markets:
+            if np.random.rand() < p_bm_skip:
+                skip_df.loc[current_indices, 'BM'] = 1
+                
+    return skip_df

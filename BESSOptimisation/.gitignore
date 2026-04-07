@@ -211,3 +211,8 @@ __marimo__/
 
 # Ignore the data directory and all its contents
 data/
+
+#ignore the logs
+logs/
+ppo_bess_logs
+sac_bess_logs
