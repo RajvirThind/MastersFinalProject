@@ -13,6 +13,9 @@ class MultiMarketBESSEnv(gym.Env):
     Features Physical Integrity Guardrails and Anti-Barcoding Penalties.
     """
     def __init__(self, df, battery_params):
+        """
+        Initialise the MultiMarketBESSEnv environment.
+        """
         super(MultiMarketBESSEnv, self).__init__()
 
         self.df = df
@@ -38,12 +41,14 @@ class MultiMarketBESSEnv(gym.Env):
         self.reset()
 
     def reset(self, seed=None, options=None):
+        """
+        Reset the environment to an initial state.
+        """
         super().reset(seed=seed)
         self.current_step = 0 
         self.soc = self.capacity * 0.5 
         self.locked_anc_mw = np.zeros(4, dtype=np.float32) 
         
-        # --- PHYSICS & MOMENTUM TRACKERS ---
         self.prev_direction = 0.0 # 1 for discharge, -1 for charge
         self.prev_arb_power = 0.0 # Track exact MW for ramp penalties
         
@@ -54,6 +59,9 @@ class MultiMarketBESSEnv(gym.Env):
         return self._get_obs(), {}
 
     def _get_obs(self):
+        """
+        Get the current observation from the environment.
+        """
         norm_soc = np.array([(self.soc - self.soc_min) / (self.soc_max - self.soc_min)], dtype=np.float32)
         current_time = self.df.index[self.current_step]
         hour_obs = np.array([current_time.hour / 23.0], dtype=np.float32)
@@ -72,11 +80,13 @@ class MultiMarketBESSEnv(gym.Env):
         return np.concatenate([norm_soc, hour_obs, efa_timer, locked_obs, flat_prices])
 
     def step(self, action):
+        """
+        Execute one time step within the environment.
+        """
         current_prices = self.df.iloc[self.current_step][self.markets].values
 
-        # ==========================================
-        # STEP A: EFA Layer (Ancillary Contracts)
-        # ==========================================
+        #EFA Layer (Ancillary Contracts)
+        
         if self.current_step % 8 == 0:
             raw_ancillary = np.clip(action[4:8], 0.0, 0.5) * self.p_max
             total_anc_req = np.sum(raw_ancillary)
@@ -84,9 +94,7 @@ class MultiMarketBESSEnv(gym.Env):
                 raw_ancillary = (raw_ancillary / total_anc_req) * (self.p_max * 0.5)
             self.locked_anc_mw = np.round(raw_ancillary)
 
-        # ==========================================
-        # STEP B: Arbitrage Layer (Winner-Takes-All)
-        # ==========================================
+        # Arbitrage Layer (Winner-Takes-All)
         total_locked = np.sum(self.locked_anc_mw)
         remaining_p_max = max(0.0, self.p_max - total_locked) 
         raw_arb = action[0:4]
@@ -94,15 +102,15 @@ class MultiMarketBESSEnv(gym.Env):
         best_market_idx = np.argmax(np.abs(raw_arb))
         focused_arb = np.zeros(4)
 
-        # Lowered Dead-zone: Let the ramp penalty do the smoothing work
+        
         if np.abs(raw_arb[best_market_idx]) > 0.50:
             focused_arb[best_market_idx] = raw_arb[best_market_idx]
             
         actual_arb_power = focused_arb * remaining_p_max
 
-        # ==========================================
-        # STEP C: Physics & Energy Balance
-        # ==========================================
+
+        #Physics & Energy Balance
+
         net_arb_power = np.sum(actual_arb_power)
         arb_charge = np.abs(net_arb_power) if net_arb_power < 0 else 0.0
         arb_discharge = net_arb_power if net_arb_power > 0 else 0.0
@@ -130,9 +138,8 @@ class MultiMarketBESSEnv(gym.Env):
         net_arb_power = np.sum(actual_arb_power)
         self.soc = np.clip(self.soc + req_in - req_out, self.soc_min, self.soc_max)
         
-        # ==========================================
-        # STEP D: Revenue & Dynamic Penalties
-        # ==========================================
+        # Revenue & Dynamic Penalties
+
         revenue = np.sum(actual_arb_power * current_prices[0:4]) * self.dt
         revenue -= (actual_arb_power[2] * current_prices[2] * self.dt) * 0.8 # BM Skip
         revenue += np.sum(self.locked_anc_mw * current_prices[4:8]) * self.dt
@@ -140,17 +147,17 @@ class MultiMarketBESSEnv(gym.Env):
         deg_cost = req_out * 6.50
         stress_cost = 12.0 * self.dt if (self.soc < 0.2*self.capacity or self.soc > 0.8*self.capacity) else 0.0
 
-        # --- 1. The Anti-Loophole Reversal Penalty ---
+        # Reversal Penalty
         current_dir = np.sign(net_arb_power)
         reversal_penalty = 0.0
         
-        # Only check/update if the battery is actively trading (prevents Idle bypass)
+        # Only check/update if the battery is actively trading
         if current_dir != 0: 
             if self.prev_direction != 0 and self.prev_direction != current_dir:
                 reversal_penalty = 30.0 # Strict penalty for flipping
             self.prev_direction = current_dir 
 
-        # --- 2. The Gradient Ramp Penalty ---
+        
         # Punish sudden jerks in power to encourage steady holding patterns
         delta_power = np.abs(net_arb_power - self.prev_arb_power)
         ramp_penalty = delta_power * 1.50 

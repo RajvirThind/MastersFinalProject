@@ -9,15 +9,15 @@ class BESS_Optimiser:
         self.time_steps = prices_df.index
         self.dt = battery_params.get('time_interval', 0.5)
         self.p_max = battery_params.get('max_power', 10)
-        
-        # FIX 1: Use sqrt(RTE) for balanced conversion losses
+
+        # Use sqrt(RTE) for balanced conversion losses
         self.rte_sqrt = battery_params.get('rte', 0.9) ** 0.5
         
         self.current_capacity = battery_params.get('capacity', 20) * current_soh
         self.soc_min = battery_params.get('soc_min_factor', 0.1) * self.current_capacity
         self.soc_max = battery_params.get('soc_max_factor', 0.9) * self.current_capacity
 
-        # SOC stress boundaries (e.g., above 80% capacity is the 'stress zone')
+        # SOC stress boundaries (above 80% capacity is the stress zone)
         self.stress_threshold = 0.8 * self.current_capacity
 
         self.soc_initial = last_soc if last_soc is not None else (battery_params.get('soc_initial_factor', 0.5) * self.current_capacity)
@@ -41,8 +41,8 @@ class BESS_Optimiser:
     def set_objective(self):
         # Revenue from price arbitrage
         arbitrage_revenue = pulp.lpSum((self.discharge[t] - self.charge[t]) * self.all_prices[t] * self.dt for t in self.time_steps)
-        
-        # FIX 2: Increased Throughput Cost
+
+        # Increased Throughput Cost
         # In 2026, including cell replacement reserves, £25-£35/MWh is more realistic than £6.50
         # This prevents the battery from cycling for tiny £5 spreads.
         deg_cost_mwh = 35.00 
@@ -63,14 +63,14 @@ class BESS_Optimiser:
             t_loc = self.prices_df.index.get_loc(t)
             soc_prev = self.soc_initial if t_loc == 0 else self.soc[self.time_steps[t_loc - 1]]
             
-            # FIX 3: Apply sqrt(RTE) to both directions
+            #Apply sqrt(RTE) to both directions
             energy_in = self.charge[t] * self.rte_sqrt * self.dt
             energy_out = self.discharge[t] / self.rte_sqrt * self.dt
             
             self.model += self.soc[t] == soc_prev + energy_in - energy_out
             self.model += self.discharge_energy[t] == energy_out
-            
-            # FIX 4: Define SOC Stress (amount of SOC above the 80% threshold)
+
+            # Define SOC Stress (amount of SOC above the 80% threshold)
             self.model += self.soc_stress[t] >= self.soc[t] - self.stress_threshold
             
             total_discharge_energy.append(self.discharge_energy[t])

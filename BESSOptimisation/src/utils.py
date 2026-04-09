@@ -36,10 +36,10 @@ def plot_revenue_stacking(dispatch_data_list, week_start_day=0):
         print("Not enough data for a 7-day revenue stack.")
         return
 
-    # 1. Concatenate 7 days of data
+    # Concatenate 7 days of data
     week_data = pd.concat(dispatch_data_list[week_start_day : week_start_day + 7])
 
-    # 2. Group the markets for cleaner visualization
+    # Group the markets for cleaner visualization
     # We group them into families to avoid a messy graph with 8+ tiny lines
     stack_df = pd.DataFrame(index=week_data.index)
     
@@ -55,10 +55,9 @@ def plot_revenue_stacking(dispatch_data_list, week_start_day=0):
     high_cols = ['Profit_DCDMHigh', 'Profit_DRHigh']
     stack_df['Ancillary_High'] = week_data[[c for c in high_cols if c in week_data.columns]].sum(axis=1)
 
-    # 3. Plotting
+    # Plotting
     fig, ax = plt.subplots(figsize=(14, 6))
     
-    # We use stackplot to show the 'composition' of revenue
     ax.stackplot(stack_df.index, 
                  stack_df['Arbitrage'], 
                  stack_df['Ancillary_Low'], 
